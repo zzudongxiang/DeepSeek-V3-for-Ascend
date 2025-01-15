@@ -1,0 +1,23 @@
+# NPU环境依赖的包
+decorator
+attrs
+psutil
+absl-py
+cloudpickle
+ml-dtypes
+scipy
+tornado
+
+# jupyter包
+ipykernel
+
+# Torch环境依赖的包
+pyyaml
+numpy==1.26.4
+torch==2.1
+torchvision==0.16.0
+
+# DeepSeek依赖的包
+transformers==4.46.3
+safetensors>=0.4.5
+# triton==3.0.0 # Ascend平台不支持该工具

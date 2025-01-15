@@ -1,0 +1,43 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Single-GPU",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "inference/generate.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--ckpt-path", ".",
+                "--config", "inference/configs/config_671B.json",
+                "--input-file", "scripts/inputs.txt",
+            ]
+        },
+        {
+            "name": "Multi-NPU",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.launch",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--nproc_per_node", "8",
+                "--nnodes", "1",
+                "--node_rank", "0",
+                "--master_addr", "localhost",
+                "--master_port", "6001",
+                "inference/generate.py",
+                "--ckpt-path", ".",
+                "--config", "inference/configs/config_671B.json",
+                "--input-file", "scripts/inputs.txt",
+            ]
+        }
+    ]
+}
