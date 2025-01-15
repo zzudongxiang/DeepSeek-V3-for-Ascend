@@ -1,20 +1,34 @@
 import math
-from dataclasses import dataclass
-from typing import Tuple, Optional, Literal
-
 import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-
+from dataclasses import dataclass
+from typing import Tuple, Optional, Literal
 from kernel import act_quant, weight_dequant, fp8_gemm
+from writer_utils import FLOPs_Writer, XCCL_Writer, Memory_Writer, Weights_Writer
 
-
-world_size = 1
 rank = 0
+world_size = 1
 block_size = 128
+disable_writer = False
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
+
+xccl_writer = XCCL_Writer()
+flops_writer = FLOPs_Writer()
+memory_writer = Memory_Writer()
+
+def clear_writer():
+    flops_writer.clear()
+    xccl_writer.clear()
+
+def split_writer():
+    flops_writer.write("-" * 50)
+    xccl_writer.write("-" * 50)
+
+def print_flops(flush_only = False):
+    flops_writer.print(flush_only)
 
 @dataclass
 class ModelArgs:
@@ -61,6 +75,7 @@ class ParallelEmbedding(nn.Module):
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+        memory_writer.recoder("ParallelEmbedding", "init", "malloc", "weight", self.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if world_size > 1:
@@ -68,20 +83,25 @@ class ParallelEmbedding(nn.Module):
             x = x - self.vocab_start_idx
             x[mask] = 0
         y = F.embedding(x, self.weight)
+        flops_writer.recoder("ParallelEmbedding", "Embedding", x, y)
         if world_size > 1:
             y[mask] = 0
             dist.all_reduce(y)
+        xccl_writer.recoder("ParallelEmbedding", "all_reduce", y)
         return y
 
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     if weight.element_size() > 1:
+        flops_writer.recoder("linear", "GEMM", x, weight, bias)
         return F.linear(x, weight, bias)
     elif gemm_impl == "bf16":
         weight = weight_dequant(weight, weight.scale)
+        flops_writer.recoder("linear", "GEMM", x, weight, bias, weight.scale)
         return F.linear(x, weight, bias)
     else:
         x, scale = act_quant(x, block_size)
+        flops_writer.recoder("linear", "GEMM", x, weight, bias, weight.scale)
         y = fp8_gemm(x, scale, weight, weight.scale)
         if bias is not None:
             y += bias
@@ -96,14 +116,17 @@ class Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        memory_writer.recoder("Linear", "init", "malloc", "weight", self.weight)
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
             scale_in_features = (in_features + block_size - 1) // block_size
             self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+            memory_writer.recoder("Linear", "init", "malloc", "scale", self.scale)
         else:
             self.register_parameter("scale", None)
         if bias:
             self.bias = nn.Parameter(torch.empty(self.part_out_features))
+            memory_writer.recoder("Linear", "init", "malloc", "bias", self.bias)
         else:
             self.register_parameter("bias", None)
 
@@ -132,6 +155,7 @@ class RowParallelLinear(Linear):
         y = linear(x, self.weight)
         if world_size > 1:
             dist.all_reduce(y)
+        xccl_writer.recoder("RowParallelLinear", "all_reduce", y)
         if self.bias is not None:
             y += self.bias
         return y
@@ -142,10 +166,22 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
+        memory_writer.recoder("RMSNorm", "init", "malloc", "weight", self.weight)
+
 
     def forward(self, x: torch.Tensor):
         x = x.float()
-        y = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        flops_writer.recoder("RMSNorm", "Vector(pow)", x)
+        tensor_a = x.pow(2)
+        flops_writer.recoder("RMSNorm", "Vector(mean)", tensor_a)
+        tensor_b = tensor_a.mean(-1, keepdim=True)
+        flops_writer.recoder("RMSNorm", "Vector(+)", tensor_a, self.eps)
+        tensor_c = tensor_b + self.eps
+        flops_writer.recoder("RMSNorm", "Vector(rsqrt)", tensor_c)
+        tensor_d = torch.rsqrt(tensor_c)
+        flops_writer.recoder("RMSNorm", "Vector(*)", x, tensor_c)
+        y = x * tensor_c
+        flops_writer.recoder("RMSNorm", "Vector(*)", y, self.weight)
         return y.type_as(self.weight) * self.weight
 
 
@@ -189,6 +225,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
+    flops_writer.recoder("apply_rotary_emb", "GEMM", x, freqs_cis)
     return y.to(dtype)
 
 
@@ -223,9 +260,13 @@ class MLA(nn.Module):
         if attn_impl == "naive":
             self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
             self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
+            memory_writer.recoder("MLA", "init", "malloc", "k_cache", self.k_cache)
+            memory_writer.recoder("MLA", "init", "malloc", "v_cache", self.v_cache)
         else:
             self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
             self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
+            memory_writer.recoder("MLA", "init", "malloc", "kv_cache", self.kv_cache)
+            memory_writer.recoder("MLA", "init", "malloc", "pe_cache", self.pe_cache)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.size()
@@ -247,23 +288,43 @@ class MLA(nn.Module):
             k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
             self.k_cache[:bsz, start_pos:end_pos] = k
+            memory_writer.recoder("Transformer", "cache", "malloc", "k", k)
             self.v_cache[:bsz, start_pos:end_pos] = v
-            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+            memory_writer.recoder("Transformer", "cache", "malloc", "v", v)
+            flops_writer.recoder("MLA", "einsum(bshd_bthd->bsht)", q, self.k_cache[:bsz, :end_pos])
+            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos])
+            flops_writer.recoder("MLA", "Vector(*)", scores, self.softmax_scale)
+            scores = scores * self.softmax_scale
         else:
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
-            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
-            scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
-                      torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
+            kv_cache = self.kv_norm(kv)
+            self.kv_cache[:bsz, start_pos:end_pos] = kv_cache
+            memory_writer.recoder("Transformer", "cache", "malloc", "kv_cache", kv_cache)
+            k_pe_cache = k_pe.squeeze(2)
+            self.pe_cache[:bsz, start_pos:end_pos] = k_pe_cache
+            memory_writer.recoder("Transformer", "cache", "malloc", "k_pe_cache", k_pe_cache)
+            flops_writer.recoder("MLA", "einsum(bshc_btc->bsht)", q_nope, self.kv_cache[:bsz, :end_pos])
+            scores_a = torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos])
+            flops_writer.recoder("MLA", "einsum(bshr_btr->bsht)", q_pe, self.pe_cache[:bsz, :end_pos])
+            scores_b = torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])
+            flops_writer.recoder("MLA", "Vector(+)", q_pe, self.pe_cache[:bsz, :end_pos])
+            scores = scores_a + scores_b
+            flops_writer.recoder("MLA", "Vector(*)", scores, self.softmax_scale)
+            scores = scores * self.softmax_scale
         if mask is not None:
-            scores += mask.unsqueeze(1)
+            tensor = mask.unsqueeze(1)
+            flops_writer.recoder("MLA", "Vector(+)", scores, tensor)
+            scores = scores + tensor
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
         if attn_impl == "naive":
+            flops_writer.recoder("MLA", "einsum(bsht_bthd->bshd)", scores, self.v_cache[:bsz, :end_pos])
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
+            flops_writer.recoder("MLA", "einsum(bsht_btc->bshc)", scores, self.kv_cache[:bsz, :end_pos])
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+            flops_writer.recoder("MLA", "einsum(bshc_hdc->bshd)", x, wkv_b[:, -self.v_head_dim:])
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         x = self.wo(x.flatten(2))
         return x
@@ -277,7 +338,9 @@ class MLP(nn.Module):
         self.w3 = ColumnParallelLinear(dim, inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        tensor = self.w1(x)
+        flops_writer.recoder("MLP", "silu", tensor)
+        return self.w2(F.silu(tensor) * self.w3(x))
 
 
 class Gate(nn.Module):
@@ -290,16 +353,21 @@ class Gate(nn.Module):
         self.score_func = args.score_func
         self.route_scale = args.route_scale
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
+        memory_writer.recoder("Gate", "init", "malloc", "weight", self.weight)
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
+        memory_writer.recoder("Gate", "init", "malloc", "bias", self.bias)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         scores = linear(x, self.weight)
         if self.score_func == "softmax":
+            flops_writer.recoder("Gate", "softmax(dim=-1)", scores)
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
+            flops_writer.recoder("Gate", "sigmoid", scores)
             scores = scores.sigmoid()
         original_scores = scores
         if self.bias is not None:
+            flops_writer.recoder("Gate", "Vector(+)", scores, self.bias)
             scores = scores + self.bias
         if self.n_groups > 1:
             scores = scores.view(x.size(0), self.n_groups, -1)
@@ -313,7 +381,11 @@ class Gate(nn.Module):
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
         if self.score_func == "sigmoid":
+            flops_writer.recoder("Gate", "Sum(dim=-1)", weights)
+            tensor = weights.sum(dim=-1, keepdim=True)
+            flops_writer.recoder("Gate", "Vector(/)", weights, tensor)
             weights /= weights.sum(dim=-1, keepdim=True)
+        flops_writer.recoder("Gate", "Vector(*)", weights, self.route_scale)
         weights *= self.route_scale
         return weights.type_as(x), indices
 
@@ -326,7 +398,9 @@ class Expert(nn.Module):
         self.w3 = Linear(dim, inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        tensor = self.w1(x)
+        flops_writer.recoder("Expert", "silu", tensor)
+        return self.w2(F.silu(tensor) * self.w3(x))
 
 
 class MoE(nn.Module):
@@ -355,10 +429,16 @@ class MoE(nn.Module):
                 continue
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
-            y[idx] += expert(x[idx]) * weights[idx, top, None]
+            tensor_a = expert(x[idx])
+            flops_writer.recoder("MoE", "Vector(*)", tensor_a, weights[idx, top, None])
+            tensor_b = tensor_a * weights[idx, top, None]
+            flops_writer.recoder("MoE", "Vector(+)", y[idx], tensor_b)
+            y[idx] = y[idx] + tensor_b
         z = self.shared_experts(x)
         if world_size > 1:
             dist.all_reduce(y)
+        flops_writer.recoder("MoE", "Vector(+)", y, z)
+        xccl_writer.recoder("MoE", "all_reduce", y)
         return (y + z).view(shape)
 
 
@@ -371,16 +451,24 @@ class Block(nn.Module):
         self.ffn_norm = RMSNorm(args.dim)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
-        x = x + self.ffn(self.ffn_norm(x))
+        tensor_a = self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        flops_writer.recoder("Block", "Vector(+)", tensor_a, x)
+        x = x + tensor_a
+        tensor_b = self.ffn(self.ffn_norm(x))
+        flops_writer.recoder("Block", "Vector(+)", tensor_b, x)
+        x = x + tensor_b
         return x
 
 
 class Transformer(nn.Module):
     def __init__(self, args: ModelArgs):
-        global world_size, rank
+        global world_size, rank, flops_writer, xccl_writer, memory_writer
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
+        if not disable_writer:
+            memory_writer = Memory_Writer(rank)
+            flops_writer = FLOPs_Writer(rank)
+            xccl_writer = XCCL_Writer(rank)
         Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
         self.max_seq_len = args.max_seq_len
@@ -391,15 +479,19 @@ class Transformer(nn.Module):
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
+        if not disable_writer:
+            weights_writer = Weights_Writer(rank)
+            weights_writer.recoder(self)
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         seqlen = tokens.size(1)
-        h = self.embed(tokens)
-        freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+            memory_writer.recoder("Transformer", "forward", "malloc", "mask", mask)
+        h = self.embed(tokens)
+        freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)[:, -1]
@@ -408,6 +500,7 @@ class Transformer(nn.Module):
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
+        xccl_writer.recoder("Transformer", "all_gather", logits)
         return logits
 
 

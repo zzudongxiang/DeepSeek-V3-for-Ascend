@@ -12,9 +12,10 @@
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
-                "--ckpt-path", ".",
-                "--config", "inference/configs/config_671B.json",
+                "--ckpt-path", "ckpt",
+                "--config", "inference/configs/config_16B.json",
                 "--input-file", "scripts/inputs.txt",
+                "--use-random-weights",
             ]
         },
         {
@@ -34,9 +35,10 @@
                 "--master_addr", "localhost",
                 "--master_port", "6001",
                 "inference/generate.py",
-                "--ckpt-path", ".",
-                "--config", "inference/configs/config_671B.json",
+                "--ckpt-path", "ckpt",
+                "--config", "inference/configs/config_16B.json",
                 "--input-file", "scripts/inputs.txt",
+                "--use-random-weights",
             ]
         }
     ]
