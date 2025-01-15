@@ -6,6 +6,8 @@
 
 ## 1. 运行程序
 
+需要提前根据并行参数执行`python inference/convert.py`转换权重
+
 **单卡环境** : 参考[`scripts/single-gpu-inference.sh`](./scripts/single-gpu-inference.sh)文件中的设置
 
 **多卡环境** : 参考[`scripts/multi-gpu-inference.sh`](./scripts/multi-gpu-inference.sh)文件中的设置

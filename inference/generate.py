@@ -71,7 +71,8 @@ def generate(
         throughput = decode_lens / decode_time
         print(f"TTFT: {ttft:.4f} seconds for {prefill_lens} tokens")
         print(f"Throughput: {throughput:.2f} tokens/s ({decode_time:.2f} seconds for {decode_lens} tokens)")
-        print_flops()
+        speed, flops, dur, cube_flops, vector_flops = print_flops()
+        # print(f"{ttft},{prefill_lens},{throughput},{decode_time},{decode_lens},{speed},{flops},{dur},{cube_flops},{vector_flops}")
         print("-" * 50)
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):

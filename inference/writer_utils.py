@@ -99,14 +99,19 @@ class FLOPs_Writer(Writer):
         self.clear()
 
     def print(self, flush_only):
+        speed = flops = dur = cube_flops = vector_flops = 0
         if not flush_only and self.write_flag and self.rank == 0:
             dur = (datetime.now() - self.t0).total_seconds()
             flops = self.total_cube_flops + self.total_vector_flops
-            speed = flops / dur
-            print(f"Model: {get_unit(speed)}FLOPs ({get_unit(flops)}op in {dur:.2f}s), Cube: {get_unit(self.total_cube_flops)}op, Vector: {get_unit(self.total_vector_flops)}op")
+            speed = get_unit(flops / dur)
+            flops = get_unit(flops)
+            cube_flops = get_unit(self.total_cube_flops)
+            vector_flops = get_unit(self.total_vector_flops)
+            print(f"Model: {speed}FLOPs/xpu ({flops}op/xpu in {dur:.2f}s), Cube: {cube_flops}op/xpu, Vector: {vector_flops}op/xpu")
         self.t0 = datetime.now()
         self.total_cube_flops = 0
         self.total_vector_flops = 0
+        return speed, flops, dur, cube_flops, vector_flops
 
     def recoder(self, layer, ops, mat_a, mat_b = None, bias = None, scale = None):
         if self.write_flag:
@@ -158,12 +163,9 @@ class Weights_Writer(Writer):
         super().__init__(rank)
         if rank < 0:
             return
-        elif rank == 0:
-            self.path = "log/model_model.csv"
-            self.title = "DataName,DataShape,DataType,DataSize"
-            self.clear()
-        else:
-            self.write_flag = False
+        self.path = f"log/model_model_{rank}.csv"
+        self.title = "DataName,DataShape,DataType,DataSize"
+        self.clear()
 
     def recoder(self, model):
         if self.write_flag:

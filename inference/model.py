@@ -28,7 +28,7 @@ def split_writer():
     xccl_writer.write("-" * 50)
 
 def print_flops(flush_only = False):
-    flops_writer.print(flush_only)
+    return flops_writer.print(flush_only)
 
 @dataclass
 class ModelArgs:
