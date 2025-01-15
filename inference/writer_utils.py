@@ -126,7 +126,7 @@ class FLOPs_Writer(Writer):
                 cube_dim = str(mat_a.shape).split(",")[-1].replace(")","").replace("]","")
                 if cube_dim not in str(mat_b.shape):
                     raise Exception(f"Cube dim {cube_dim} not in mat_b shape {mat_b.shape}")
-                cube_flops = mat_a_flops * mat_b_flops / float(cube_dim)
+                cube_flops = 2 * mat_a_flops * mat_b_flops / float(cube_dim)
             else:
                 vector_flops = float(torch.prod(torch.tensor(mat_a.shape)))
                 if mat_b is not None and isinstance(mat_b, torch.Tensor):
