@@ -19,9 +19,9 @@ xccl_writer = XCCL_Writer()
 flops_writer = FLOPs_Writer()
 memory_writer = Memory_Writer()
 
-def clear_writer():
-    flops_writer.clear()
-    xccl_writer.clear()
+def writer_finished():
+    flops_writer.finished()
+    xccl_writer.finished()
 
 def split_writer():
     flops_writer.write("-" * 50)

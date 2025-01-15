@@ -12,7 +12,7 @@ from model import Transformer, ModelArgs
 
 from typing import Literal
 from datetime import datetime
-from model import clear_writer, split_writer, print_flops
+from model import writer_finished, split_writer, print_flops
 default_device: Literal["cuda", "npu"] = "cuda"
 try:
     import torch_npu
@@ -118,7 +118,7 @@ def main(
         tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     if not use_random_weights:
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-    clear_writer()
+    writer_finished()
 
     if interactive:
         messages = []
