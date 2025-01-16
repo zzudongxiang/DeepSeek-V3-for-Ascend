@@ -36,32 +36,36 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
     state_dicts = [{} for _ in range(mp)]
 
     for file_path in tqdm(glob(os.path.join(hf_ckpt_path, "*.safetensors"))):
-        with safe_open(file_path, framework="pt", device="cpu") as f:
-            for name in f.keys():
-                if "model.layers.61" in name:
-                    continue
-                param: torch.Tensor = f.get_tensor(name)
-                if name.startswith("model."):
-                    name = name[len("model."):]
-                name = name.replace("self_attn", "attn")
-                name = name.replace("mlp", "ffn")
-                name = name.replace("weight_scale_inv", "scale")
-                name = name.replace("e_score_correction_bias", "bias")
-                key = name.split(".")[-2]
-                assert key in mapping
-                new_key, dim = mapping[key]
-                name = name.replace(key, new_key)
-                for i in range(mp):
-                    new_param = param
-                    if "experts" in name and "shared_experts" not in name:
-                        idx = int(name.split(".")[-3])
-                        if idx < i * n_local_experts or idx >= (i + 1) * n_local_experts:
-                            continue
-                    elif dim is not None:
-                        assert param.size(dim) % mp == 0
-                        shard_size = param.size(dim) // mp
-                        new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
-                    state_dicts[i][name] = new_param
+        try:
+            with safe_open(file_path, framework="pt", device="cpu") as f:
+                for name in f.keys():
+                    if "model.layers.61" in name:
+                        continue
+                    param: torch.Tensor = f.get_tensor(name)
+                    if name.startswith("model."):
+                        name = name[len("model."):]
+                    name = name.replace("self_attn", "attn")
+                    name = name.replace("mlp", "ffn")
+                    name = name.replace("weight_scale_inv", "scale")
+                    name = name.replace("e_score_correction_bias", "bias")
+                    key = name.split(".")[-2]
+                    assert key in mapping
+                    new_key, dim = mapping[key]
+                    name = name.replace(key, new_key)
+                    for i in range(mp):
+                        new_param = param
+                        if "experts" in name and "shared_experts" not in name:
+                            idx = int(name.split(".")[-3])
+                            if idx < i * n_local_experts or idx >= (i + 1) * n_local_experts:
+                                continue
+                        elif dim is not None:
+                            assert param.size(dim) % mp == 0
+                            shard_size = param.size(dim) // mp
+                            new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
+                        state_dicts[i][name] = new_param
+        except Exception as e:
+            print("Error in", file_path)
+            raise e
 
     os.makedirs(save_path, exist_ok=True)
 
