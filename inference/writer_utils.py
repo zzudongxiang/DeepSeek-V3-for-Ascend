@@ -53,13 +53,13 @@ class Writer:
     def write(self, line):
         self.context.append(line)
 
-    def finished(self):
+    def finished(self, mode = "w+"):
         if self.rank >= 0:
             self.dir_path = os.path.dirname(self.path)
             if not os.path.exists(self.dir_path):
                 os.makedirs(self.dir_path)
-            with open(self.path, "w+") as file:
-                file.write(f"{self.title}\n")
+            with open(self.path, mode) as file:
+                file.write(f"{self.title}\n" if mode == "w+" else "\n")
                 file.write("\n".join(self.context))
         self.context = []
 
@@ -97,7 +97,7 @@ class FLOPs_Writer(Writer):
             flops = get_unit(flops)
             cube_flops = get_unit(self.total_cube_flops)
             vector_flops = get_unit(self.total_vector_flops)
-            print(f"Model: {speed}FLOPs/xpu ({flops}op/xpu in {dur:.2f}s), Cube: {cube_flops}op/xpu, Vector: {vector_flops}op/xpu")
+            print(f"Model: {speed}FLOPs/xpu ({flops}ops/xpu in {dur:.2f}s), Cube: {cube_flops}ops/xpu, Vector: {vector_flops}ops/xpu")
         self.t0 = datetime.now()
         self.total_cube_flops = 0
         self.total_vector_flops = 0
@@ -134,6 +134,8 @@ class Memory_Writer(Writer):
         self.t0 = datetime.now()
         self.path = f"log/{dir}/model_memory_{rank}.csv"
         self.title = "Time,Dur_s,Layer,Stage,Ops,Ops_Type,Memory_in_Used,DataShape,DataType,DataSize"
+        with open(self.path, "w+") as file:
+            file.write(self.title)
 
     def recoder(self, layer, stage: Literal["init", "forward", "cache"], ops: Literal["malloc", "free"], op_type, tensor):
         if self.rank >= 0 and tensor is not None:
@@ -144,7 +146,7 @@ class Memory_Writer(Writer):
                     self.memory_used -= get_tensor_size(tensor)
                 else:
                     raise Exception(f"Unsupported ops: {ops}")
-            self.write(f"{datetime.now()},{(datetime.now()- self.t0).total_seconds()},{layer},{ops},{op_type},{self.memory_used},{get_tensor_info(tensor)}")
+            self.write(f"{datetime.now()},{(datetime.now()- self.t0).total_seconds()},{layer},{stage},{ops},{op_type},{self.memory_used},{get_tensor_info(tensor)}")
 
 
 class Weights_Writer(Writer):
@@ -152,7 +154,7 @@ class Weights_Writer(Writer):
         super().__init__(rank)
         if rank < 0:
             return
-        self.path = f"log/{dir}/model_model_{rank}.csv"
+        self.path = f"log/{dir}/model_weights_{rank}.csv"
         self.title = "DataName,DataShape,DataType,DataSize"
 
     def recoder(self, model):

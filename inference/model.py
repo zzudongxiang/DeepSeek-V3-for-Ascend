@@ -20,6 +20,7 @@ flops_writer = FLOPs_Writer()
 memory_writer = Memory_Writer()
 
 def writer_finished():
+    memory_writer.finished("a+")
     flops_writer.finished()
     xccl_writer.finished()
 

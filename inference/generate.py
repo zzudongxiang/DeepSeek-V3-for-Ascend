@@ -80,6 +80,7 @@ def generate(
         if eos_id in toks:
             toks = toks[:toks.index(eos_id)]
         completion_tokens.append(toks)
+    writer_finished()
     return completion_tokens
 
 
@@ -118,7 +119,6 @@ def main(
         tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     if not use_random_weights:
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-    writer_finished()
 
     if interactive:
         messages = []
