@@ -134,6 +134,9 @@ class Memory_Writer(Writer):
         self.t0 = datetime.now()
         self.path = f"log/{dir}/model_memory_{rank}.csv"
         self.title = "Time,Dur_s,Layer,Stage,Ops,Ops_Type,Memory_in_Used,DataShape,DataType,DataSize"
+        self.dir_path = os.path.dirname(self.path)
+        if not os.path.exists(self.dir_path):
+            os.makedirs(self.dir_path)
         with open(self.path, "w+") as file:
             file.write(self.title)
 
