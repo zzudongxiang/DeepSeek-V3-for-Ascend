@@ -131,9 +131,10 @@ class Memory_Writer(Writer):
         if rank < 0:
             return
         self.memory_used = 0
+        self.kv_cache = 0
         self.t0 = datetime.now()
         self.path = f"log/{dir}/model_memory_{rank}.csv"
-        self.title = "Time,Dur_s,Layer,Stage,Ops,Ops_Type,Memory_in_Used,DataShape,DataType,DataSize"
+        self.title = "Time,Dur_s,Layer,Stage,Ops,Ops_Type,Memory_in_Used,DataShape,DataType,DataSize,KV-Cache"
         self.dir_path = os.path.dirname(self.path)
         if not os.path.exists(self.dir_path):
             os.makedirs(self.dir_path)
@@ -149,7 +150,16 @@ class Memory_Writer(Writer):
                     self.memory_used -= get_tensor_size(tensor)
                 else:
                     raise Exception(f"Unsupported ops: {ops}")
-            self.write(f"{datetime.now()},{(datetime.now()- self.t0).total_seconds()},{layer},{stage},{ops},{op_type},{self.memory_used},{get_tensor_info(tensor)}")
+            elif stage in ["cache"]:
+                if ops == "malloc":
+                    self.kv_cache += get_tensor_size(tensor)
+                elif ops == "free":
+                    self.kv_cache -= get_tensor_size(tensor)
+                else:
+                    raise Exception(f"Unsupported ops: {ops}")
+            else:
+                raise Exception(f"Unsupported stage: {stage}")
+            self.write(f"{datetime.now()},{(datetime.now()- self.t0).total_seconds()},{layer},{stage},{ops},{op_type},{self.memory_used},{get_tensor_info(tensor)},{self.kv_cache}")
 
 
 class Weights_Writer(Writer):
