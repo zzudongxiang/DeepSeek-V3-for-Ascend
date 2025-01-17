@@ -118,7 +118,9 @@ def main(
     if not profiling:
         tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     if not use_random_weights:
+        print(datetime.now(), "start load weights")
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+        print(datetime.now(), "load weights finished")
 
     if interactive:
         messages = []

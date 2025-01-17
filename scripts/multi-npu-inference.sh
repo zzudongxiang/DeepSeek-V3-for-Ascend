@@ -36,7 +36,7 @@ DISTRIBUTED_ARGS="
 "
 
 torchrun $DISTRIBUTED_ARGS inference/generate.py    \
-    --ckpt-path ckpt/                               \
+    --ckpt-path ckpt-ep256-mp32/                    \
     --input-file scripts/inputs.txt                 \
     --config inference/configs/config_671B.json     \
     | tee log/multi-npu-inference.log

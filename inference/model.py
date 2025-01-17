@@ -6,7 +6,7 @@ import torch.distributed as dist
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
 from kernel import act_quant, weight_dequant, fp8_gemm
-from writer_utils import FLOPs_Writer, XCCL_Writer, Memory_Writer, Weights_Writer
+from writer_utils import FLOPs_Writer, XCCL_Writer, Memory_Writer, Weights_Writer, tensor_hist
 
 rank = 0
 world_size = 1
@@ -89,23 +89,29 @@ class ParallelEmbedding(nn.Module):
             y[mask] = 0
             dist.all_reduce(y)
         xccl_writer.recoder("ParallelEmbedding", "all_reduce", y)
+        tensor_hist("ParallelEmbedding", "y", y)
         return y
 
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     if weight.element_size() > 1:
         flops_writer.recoder("linear", "GEMM", x, weight, bias)
-        return F.linear(x, weight, bias)
+        y = F.linear(x, weight, bias)
+        tensor_hist("linear", "y", y)
+        return y
     elif gemm_impl == "bf16":
         weight = weight_dequant(weight, weight.scale)
         flops_writer.recoder("linear", "GEMM", x, weight, bias, weight.scale)
-        return F.linear(x, weight, bias)
+        y = F.linear(x, weight, bias)
+        tensor_hist("linear", "y", y)
+        return y
     else:
         x, scale = act_quant(x, block_size)
         flops_writer.recoder("linear", "GEMM", x, weight, bias, weight.scale)
         y = fp8_gemm(x, scale, weight, weight.scale)
         if bias is not None:
             y += bias
+        tensor_hist("linear", "y", y)
         return y
 
 
@@ -183,7 +189,9 @@ class RMSNorm(nn.Module):
         flops_writer.recoder("RMSNorm", "Vector(*)", x, tensor_c)
         y = x * tensor_c
         flops_writer.recoder("RMSNorm", "Vector(*)", y, self.weight)
-        return y.type_as(self.weight) * self.weight
+        y = y.type_as(self.weight) * self.weight
+        tensor_hist("RMSNorm", "y", y)
+        return y
 
 
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
@@ -227,6 +235,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     flops_writer.recoder("apply_rotary_emb", "GEMM", x, freqs_cis)
+    tensor_hist("apply_rotary_emb", "y", y)
     return y.to(dtype)
 
 
@@ -296,6 +305,7 @@ class MLA(nn.Module):
             scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos])
             flops_writer.recoder("MLA", "Vector(*)", scores, self.softmax_scale)
             scores = scores * self.softmax_scale
+            tensor_hist("MLA", "scores", scores)
         else:
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
@@ -314,6 +324,7 @@ class MLA(nn.Module):
             scores = scores_a + scores_b
             flops_writer.recoder("MLA", "Vector(*)", scores, self.softmax_scale)
             scores = scores * self.softmax_scale
+            tensor_hist("MLA", "scores", scores)
         if mask is not None:
             tensor = mask.unsqueeze(1)
             flops_writer.recoder("MLA", "Vector(+)", scores, tensor)
@@ -328,6 +339,7 @@ class MLA(nn.Module):
             flops_writer.recoder("MLA", "einsum(bshc_hdc->bshd)", x, wkv_b[:, -self.v_head_dim:])
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         x = self.wo(x.flatten(2))
+        tensor_hist("MLA", "x", x)
         return x
 
 
@@ -341,7 +353,9 @@ class MLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tensor = self.w1(x)
         flops_writer.recoder("MLP", "silu", tensor)
-        return self.w2(F.silu(tensor) * self.w3(x))
+        y = self.w2(F.silu(tensor) * self.w3(x))
+        tensor_hist("MLP", "y", y)
+        return y
 
 
 class Gate(nn.Module):
@@ -388,6 +402,7 @@ class Gate(nn.Module):
             weights /= weights.sum(dim=-1, keepdim=True)
         flops_writer.recoder("Gate", "Vector(*)", weights, self.route_scale)
         weights *= self.route_scale
+        tensor_hist("Gate", "weights", weights)
         return weights.type_as(x), indices
 
 
@@ -401,7 +416,9 @@ class Expert(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tensor = self.w1(x)
         flops_writer.recoder("Expert", "silu", tensor)
-        return self.w2(F.silu(tensor) * self.w3(x))
+        y = self.w2(F.silu(tensor) * self.w3(x))
+        tensor_hist("Expert", "y", y)
+        return y
 
 
 class MoE(nn.Module):
@@ -440,7 +457,9 @@ class MoE(nn.Module):
             dist.all_reduce(y)
         flops_writer.recoder("MoE", "Vector(+)", y, z)
         xccl_writer.recoder("MoE", "all_reduce", y)
-        return (y + z).view(shape)
+        out = (y + z).view(shape)
+        tensor_hist("MoE", "out", out)
+        return out
 
 
 class Block(nn.Module):
@@ -458,6 +477,7 @@ class Block(nn.Module):
         tensor_b = self.ffn(self.ffn_norm(x))
         flops_writer.recoder("Block", "Vector(+)", tensor_b, x)
         x = x + tensor_b
+        tensor_hist("Block", "x", x)
         return x
 
 

@@ -1,6 +1,7 @@
 import os, re, torch
 from typing import Literal
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 dir = "model_info"
 
@@ -176,3 +177,25 @@ class Weights_Writer(Writer):
         model_info = model.state_dict()
         for item in model_info:
             self.write(f"{item},{get_tensor_info(model_info[item])}")
+
+tensor_hist_dict = {}
+def tensor_hist(layer, tenser_name, tensor):
+    global tensor_hist_dict
+    mat = tensor.flatten().float().numpy(force = True)
+    dict_key = f"{layer}-{tenser_name}"
+    if dict_key not in tensor_hist_dict:
+        tensor_hist_dict[dict_key] = 0
+    tensor_hist_dict[dict_key] += 1
+    dict_key = f"{dict_key}-{tensor_hist_dict[dict_key]}"
+    plt.hist(mat, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    plt.title(f"{dict_key} >> {get_tensor_shape(tensor.shape)},{get_tensor_dtype(tensor.dtype)}")
+    plt.xlabel('Value')
+    plt.ylabel('Frequency')
+    fig_path = f"log/tensor_hist/{dict_key}.png"
+    fig_dir = os.path.dirname(fig_path)
+    if not os.path.exists(fig_dir):
+        os.makedirs(fig_dir)
+    plt.savefig(fig_path)
+
+if __name__ == '__main__':
+    tensor_hist("writer", "randn", torch.randn((1000, 1000), dtype=torch.bfloat16))
