@@ -35,8 +35,8 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 
-torchrun $DISTRIBUTED_ARGS inference/generate.py    \
+torchrun $DISTRIBUTED_ARGS pretrain.py              \
     --ckpt-path ckpt-ep256-mp32/                    \
-    --input-file scripts/inputs.txt                 \
-    --config inference/configs/config_671B.json     \
-    | tee log/multi-npu-inference.log
+    --input-file scripts/shakespeare.txt            \
+    --config configs/config_671B.json               \
+    | tee log/pretrain-multi-npu.log

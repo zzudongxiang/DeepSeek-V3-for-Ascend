@@ -4,10 +4,9 @@ mkdir -p log
 
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-# --profiling
-python inference/generate.py                    \
+python inference.py                             \
     --ckpt-path ckpt/                           \
     --input-file scripts/inputs.txt             \
-    --config inference/configs/config_16B.json  \
+    --config configs/config_16B.json            \
     --use-random-weights                        \
-    | tee log/single-gpu-inference.log
+    | tee log/inference-single-gpu.log

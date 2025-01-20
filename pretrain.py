@@ -57,10 +57,11 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 all_batch = None
+dataset_path = "dataset.txt"
 def get_batch(tokenizer, seq_len):
     global all_batch, batch_size
     if all_batch is None:
-        with open("scripts/shakespeare.txt", "r+") as file:
+        with open(dataset_path, "r+") as file:
             all_batch = file.readlines()
         all_batch = '\n'.join(all_batch)
         all_batch = np.array(tokenizer.encode(all_batch, max_length=len(all_batch), truncation=True), dtype=np.int64)
@@ -136,5 +137,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--local-rank", type=int, default=0)
     parser.add_argument("--use-random-weights", action="store_true")
+    parser.add_argument("--input-file", type=str, default="scripts/shakespeare.txt")
     args = parser.parse_args()
+    dataset_path = args.input_file
     main(args.ckpt_path, args.config, args.use_random_weights)
