@@ -10,8 +10,8 @@ import torch.distributed as dist
 from model.kernel import act_quant, weight_dequant, fp8_gemm
 
 
-world_size = 1
 rank = 0
+world_size = 1
 block_size = 128
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
@@ -386,23 +386,20 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    # 将输入 x 转换为实部和虚部
-    x_real = x.float().view(*x.shape[:-1], -1, 2)[..., 0]  # 实部
-    x_imag = x.float().view(*x.shape[:-1], -1, 2)[..., 1]  # 虚部
-
-    # 将 freqs_cis 转换为实部和虚部
+    x_real = x.float().view(*x.shape[:-1], -1, 2)[..., 0]
+    x_imag = x.float().view(*x.shape[:-1], -1, 2)[..., 1]
     freqs_cis = torch.view_as_real(freqs_cis.view(1, x.size(1), 1, x_real.size(-1)))
-    freqs_real = freqs_cis[..., 0]  # 实部
-    freqs_imag = freqs_cis[..., 1]  # 虚部
-
-    # 复数乘法：(x_real + x_imag * i) * (freqs_real + freqs_imag * i)
-    # 结果实部：x_real * freqs_real - x_imag * freqs_imag
-    # 结果虚部：x_real * freqs_imag + x_imag * freqs_real
+    freqs_real = freqs_cis[..., 0]
+    freqs_imag = freqs_cis[..., 1]
     y_real = x_real * freqs_real - x_imag * freqs_imag
     y_imag = x_real * freqs_imag + x_imag * freqs_real
-
-    # 将结果拼接为 [..., 2] 的形状
     y = torch.stack([y_real, y_imag], dim=-1).flatten(3)
+    return y.to(dtype)
+
+    dtype = x.dtype
+    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
+    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
+    y = torch.view_as_real(x * freqs_cis).flatten(3)
     return y.to(dtype)
 
 
@@ -760,17 +757,18 @@ class Transformer(nn.Module):
         head (nn.Module): Output projection layer mapping to vocabulary size.
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, dtype = torch.bfloat16):
         """
         Initializes the Transformer model.
 
         Args:
             args (ModelArgs): Model arguments containing transformer parameters.
         """
-        global world_size, rank
+        global world_size, rank, default_dtype
+        default_dtype = dtype
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
-        Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
+        Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else dtype
         super().__init__()
         self.max_seq_len = args.max_seq_len
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)

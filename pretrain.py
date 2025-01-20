@@ -9,6 +9,7 @@ import numpy as np
 from typing import Literal
 from datetime import datetime
 import torch.distributed as dist
+from contextlib import nullcontext
 from argparse import ArgumentParser
 from torch.nn import functional as F
 from transformers import AutoTokenizer
@@ -19,12 +20,13 @@ from model.deepseek import writer_finished
 from model.deepseek_origin import Transformer, ModelArgs
 
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
+default_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}["float16"]
 
 try:
     import torch_npu
     from torch_npu.npu import amp
     import mindspeed.megatron_adaptor
-    default_device = "npu:7"
+    default_device = "npu:7" # npu:7
 except:
     from torch import amp
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,8 +84,8 @@ def get_batch(tokenizer, seq_len):
     ix = torch.randint(len(all_batch) - seq_len, (batch_size,))
     x = torch.stack([torch.from_numpy(all_batch[i : i + seq_len]) for i in ix])
     y = torch.stack([torch.from_numpy(all_batch[i + 1 : i + 1 + seq_len]) for i in ix])
-    x = x.pin_memory().to(default_device, non_blocking=True)
-    y = y.pin_memory().to(default_device, non_blocking=True)
+    x = x.to(default_device)
+    y = y.to(default_device)
     return x, y
 
 def main(
@@ -103,7 +105,7 @@ def main(
         torch_npu.npu.set_device(local_rank)
     else:
         torch.cuda.set_device(local_rank)
-    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_dtype(default_dtype)
     torch.set_num_threads(8)
     torch.manual_seed(965)
     with open(config) as f:
@@ -111,12 +113,12 @@ def main(
     assert batch_size < args.max_batch_size
     print(args)
     with torch.device(default_device):
-        model = Transformer(args)
+        model = Transformer(args, default_dtype)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     if re.match(r"npu(\:\d+)?", default_device):
-        ctx = amp.autocast(dtype=torch.bfloat16)
+        ctx = amp.autocast(dtype=default_dtype)
     else:
-        ctx = amp.autocast(dtype=torch.bfloat16, device_type=default_device)
+        ctx = nullcontext() if default_device == 'cpu' else torch.amp.autocast(device_type=default_device, dtype=default_dtype)
     optimizer = configure_optimizers(
         model,
         weight_decay,
