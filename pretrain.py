@@ -1,5 +1,6 @@
 #!/bin/python
 
+import re
 import os
 import json
 import math
@@ -14,7 +15,8 @@ from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
 from model.utils.tools import sample
-from model.deepseek import Transformer, ModelArgs
+from model.deepseek import writer_finished
+from model.deepseek_origin import Transformer, ModelArgs
 
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
 
@@ -22,7 +24,7 @@ try:
     import torch_npu
     from torch_npu.npu import amp
     import mindspeed.megatron_adaptor
-    default_device = "npu"
+    default_device = "npu:7"
 except:
     from torch import amp
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,6 +44,29 @@ warmup_iters = 100
 lr_decay_iters = 5000
 min_lr = 1e-4
 
+def configure_optimizers(model, weight_decay, learning_rate, betas):
+    # start with all of the candidate parameters
+    param_dict = {pn: p for pn, p in model.named_parameters()}
+    # filter out those that do not require grad
+    param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+    # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+    # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+    decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+    optim_groups = [
+        {'params': decay_params, 'weight_decay': weight_decay},
+        {'params': nodecay_params, 'weight_decay': 0.0}
+    ]
+    num_decay_params = sum(p.numel() for p in decay_params)
+    num_nodecay_params = sum(p.numel() for p in nodecay_params)
+    print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+    print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+    if re.match(r"npu(\:\d+)?", default_device):
+        import torch_npu
+        optimizer = torch_npu.optim.NpuFusedAdamW(optim_groups, lr=learning_rate, betas=betas)
+    else:
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas)
+    return optimizer
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -99,12 +124,15 @@ def main(
     with torch.device(default_device):
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    ctx = amp.autocast(dtype=torch.bfloat16)
-    optimizer = model.configure_optimizers(
+    if re.match(r"npu(\:\d+)?", default_device):
+        ctx = amp.autocast(dtype=torch.bfloat16)
+    else:
+        ctx = amp.autocast(dtype=torch.bfloat16, device_type=default_device)
+    optimizer = configure_optimizers(
+        model,
         weight_decay,
         learning_rate,
-        (beta1, beta2),
-        default_device,
+        (beta1, beta2)
     )
     if not use_random_weights:
         print(datetime.now(), "start load weights")
@@ -113,7 +141,7 @@ def main(
     iter_num = 0
     while iter_num < max_iters:
         iter_num += 1
-        X, Y = get_batch(tokenizer, args.max_seq_len, args.max_batch_size)
+        X, Y = get_batch(tokenizer, args.max_seq_len)
         t0 = datetime.now()
         # 计算学习率
         lr = get_lr(iter_num) if decay_lr else learning_rate
@@ -121,7 +149,7 @@ def main(
             param_group["lr"] = lr
         # 对Micro-Batch进行FWD和BWD训练
         with ctx:
-            logits, loss = model.forward(X, start_pos=0, targets=Y)
+            _, loss = model.forward(X, start_pos=0, targets=Y)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=False)
@@ -140,4 +168,9 @@ if __name__ == "__main__":
     parser.add_argument("--input-file", type=str, default="scripts/shakespeare.txt")
     args = parser.parse_args()
     dataset_path = args.input_file
-    main(args.ckpt_path, args.config, args.use_random_weights)
+    try:
+        main(args.ckpt_path, args.config, args.use_random_weights)
+    except Exception as e:
+        raise e
+    finally:
+        writer_finished()
