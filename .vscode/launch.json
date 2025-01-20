@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Single-GPU",
+            "name": "Infrence-Single-GPU",
             "type": "debugpy",
             "request": "launch",
             "program": "inference/generate.py",
@@ -19,7 +19,7 @@
             ]
         },
         {
-            "name": "Multi-NPU",
+            "name": "Infrence-Multi-NPU",
             "type": "debugpy",
             "request": "launch",
             "module": "torch.distributed.launch",
@@ -40,6 +40,19 @@
                 "--input-file", "scripts/inputs.txt",
                 "--use-random-weights",
             ]
-        }
+        },
+        {
+            "name": "PreTrain-Single-GPU",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "pretrain/train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--ckpt-path", "ckpt",
+                "--config", "inference/configs/config_16B.json",
+                "--use-random-weights",
+            ]
+        },
     ]
 }
