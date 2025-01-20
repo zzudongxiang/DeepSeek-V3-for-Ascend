@@ -1,4 +1,7 @@
-import os, re, torch
+import os
+import re
+import torch
+import numpy as np
 from typing import Literal
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -179,15 +182,18 @@ class Weights_Writer(Writer):
             self.write(f"{item},{get_tensor_info(model_info[item])}")
 
 tensor_hist_dict = {}
-def tensor_hist(layer, tenser_name, tensor):
+def tensor_hist(rank, layer, tenser_name, tensor):
+    if rank != 0:
+        return
     global tensor_hist_dict
-    mat = tensor.flatten().float().numpy(force = True)
+    mat = tensor.flatten().float().cpu().numpy()
     dict_key = f"{layer}-{tenser_name}"
     if dict_key not in tensor_hist_dict:
         tensor_hist_dict[dict_key] = 0
     tensor_hist_dict[dict_key] += 1
     dict_key = f"{dict_key}-{tensor_hist_dict[dict_key]}"
-    plt.hist(mat, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    bins=max(1, min(500, int(len(mat) / 10)))
+    plt.hist(mat, bins=bins)
     plt.title(f"{dict_key} >> {get_tensor_shape(tensor.shape)},{get_tensor_dtype(tensor.dtype)}")
     plt.xlabel('Value')
     plt.ylabel('Frequency')
@@ -198,4 +204,4 @@ def tensor_hist(layer, tenser_name, tensor):
     plt.savefig(fig_path)
 
 if __name__ == '__main__':
-    tensor_hist("writer", "randn", torch.randn((1000, 1000), dtype=torch.bfloat16))
+    tensor_hist(0, "writer", "randn", torch.randn((1000, 1000), dtype=torch.bfloat16))
