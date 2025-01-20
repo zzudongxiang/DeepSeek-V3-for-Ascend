@@ -1,6 +1,5 @@
-from typing import Tuple
-
 import torch
+from typing import Tuple
 
 skip_kernel = False
 try:

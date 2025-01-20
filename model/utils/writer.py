@@ -180,6 +180,7 @@ class Weights_Writer(Writer):
         model_info = model.state_dict()
         for item in model_info:
             self.write(f"{item},{get_tensor_info(model_info[item])}")
+        self.finished()
 
 tensor_hist_dict = {}
 def tensor_hist(rank, layer, tenser_name, tensor):

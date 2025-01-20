@@ -1,31 +1,29 @@
+#!/bin/python
+
 import os
 import json
-from argparse import ArgumentParser
-from typing import List
-
 import torch
+from typing import List
+from typing import Literal
+from datetime import datetime
 import torch.distributed as dist
+from argparse import ArgumentParser
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
-from model import Transformer, ModelArgs
+from model.utils.tools import sample
+from model.deepseek import Transformer, ModelArgs
+from model.deepseek import writer_finished, writer_split, print_flops
 
-from typing import Literal
-from datetime import datetime
-from model import writer_finished, split_writer, print_flops
-default_device: Literal["cuda", "npu"] = "cuda"
+default_device: Literal["cuda", "npu", "cpu"] = "cuda"
+
 try:
     import torch_npu
     import mindspeed.megatron_adaptor
     default_device = "npu"
 except:
-    print("torch_npu not found, using cuda")
-
-def sample(logits, temperature: float = 1.0):
-    logits = logits / max(temperature, 1e-5)
-    probs = torch.softmax(logits, dim=-1)
-    return probs.div_(torch.empty_like(probs).exponential_(1)).argmax(dim=-1)
-
+    default_device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"torch_npu not found, using {default_device}")
 
 @torch.inference_mode()
 def generate(
@@ -48,10 +46,10 @@ def generate(
     start = datetime.now()
     print_flops(flush_only=True)
     for cur_pos in range(min(prompt_lens), total_len):
-        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        logits, _ = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
         if prev_pos == 0:
             t0 = datetime.now()
-            split_writer()
+            writer_split()
         if temperature > 0:
             next_token = sample(logits, temperature)
         else:

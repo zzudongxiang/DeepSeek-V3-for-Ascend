@@ -5,21 +5,21 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Infrence-Single-GPU",
+            "name": "Inference-Single-GPU",
             "type": "debugpy",
             "request": "launch",
-            "program": "inference/generate.py",
+            "program": "inference.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--ckpt-path", "ckpt",
-                "--config", "inference/configs/config_16B.json",
+                "--config", "configs/config_16B.json",
                 "--input-file", "scripts/inputs.txt",
                 "--use-random-weights",
             ]
         },
         {
-            "name": "Infrence-Multi-NPU",
+            "name": "Inference-Multi-NPU",
             "type": "debugpy",
             "request": "launch",
             "module": "torch.distributed.launch",
@@ -34,23 +34,23 @@
                 "--node_rank", "0",
                 "--master_addr", "localhost",
                 "--master_port", "6001",
-                "inference/generate.py",
+                "inference.py",
                 "--ckpt-path", "ckpt",
-                "--config", "inference/configs/config_16B.json",
+                "--config", "configs/config_16B.json",
                 "--input-file", "scripts/inputs.txt",
                 "--use-random-weights",
             ]
         },
         {
-            "name": "PreTrain-Single-GPU",
+            "name": "Pretrain-Single-GPU",
             "type": "debugpy",
             "request": "launch",
-            "program": "pretrain/train.py",
+            "program": "pretrain.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--ckpt-path", "ckpt",
-                "--config", "inference/configs/config_16B.json",
+                "--config", "configs/config_16B.json",
                 "--use-random-weights",
             ]
         },
