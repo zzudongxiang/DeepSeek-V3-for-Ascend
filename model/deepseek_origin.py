@@ -386,9 +386,23 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
+    # 将输入 x 转换为实部和虚部
+    x_real = x.float().view(*x.shape[:-1], -1, 2)[..., 0]  # 实部
+    x_imag = x.float().view(*x.shape[:-1], -1, 2)[..., 1]  # 虚部
+
+    # 将 freqs_cis 转换为实部和虚部
+    freqs_cis = torch.view_as_real(freqs_cis.view(1, x.size(1), 1, x_real.size(-1)))
+    freqs_real = freqs_cis[..., 0]  # 实部
+    freqs_imag = freqs_cis[..., 1]  # 虚部
+
+    # 复数乘法：(x_real + x_imag * i) * (freqs_real + freqs_imag * i)
+    # 结果实部：x_real * freqs_real - x_imag * freqs_imag
+    # 结果虚部：x_real * freqs_imag + x_imag * freqs_real
+    y_real = x_real * freqs_real - x_imag * freqs_imag
+    y_imag = x_real * freqs_imag + x_imag * freqs_real
+
+    # 将结果拼接为 [..., 2] 的形状
+    y = torch.stack([y_real, y_imag], dim=-1).flatten(3)
     return y.to(dtype)
 
 
