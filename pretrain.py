@@ -19,6 +19,7 @@ from model.utils.tools import sample
 from model.deepseek import writer_finished
 from model.deepseek_origin import Transformer, ModelArgs
 
+# BUG: 暂时不支持bf16的混合精度训练
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
 default_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}["float16"]
 
@@ -26,54 +27,20 @@ try:
     import torch_npu
     from torch_npu.npu import amp
     import mindspeed.megatron_adaptor
-    default_device = "npu:7" # npu:7
+    default_device = "npu" # npu:7
 except:
     from torch import amp
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"torch_npu not found, using {default_device}")
 
+seq_len = 1024
 batch_size = 1
 max_iters = 100
 log_interval = 1
-
-learning_rate = 1e-3
-beta1 = 0.9
-beta2 = 0.99
-decay_lr = True
-weight_decay = 1e-1
-
-warmup_iters = 100
-lr_decay_iters = 5000
-min_lr = 1e-4
-
-def configure_optimizers(model, weight_decay, learning_rate, betas):
-    param_dict = {pn: p for pn, p in model.named_parameters()}
-    param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-    decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-    optim_groups = [
-        {'params': decay_params, 'weight_decay': weight_decay},
-        {'params': nodecay_params, 'weight_decay': 0.0}
-    ]
-    if re.match(r"npu(\:\d+)?", default_device):
-        import torch_npu
-        optimizer = torch_npu.optim.NpuFusedAdamW(optim_groups, lr=learning_rate, betas=betas)
-    else:
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas)
-    return optimizer
-
-def get_lr(it):
-    if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
-    if it > lr_decay_iters:
-        return min_lr
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return min_lr + coeff * (learning_rate - min_lr)
-
+learning_rate = 1e-6
 all_batch = None
 dataset_path = "dataset.txt"
+
 def get_batch(tokenizer, seq_len):
     global all_batch, batch_size
     if all_batch is None:
@@ -110,21 +77,21 @@ def main(
     torch.manual_seed(965)
     with open(config) as f:
         args = ModelArgs(**json.load(f))
-    assert batch_size < args.max_batch_size
+    assert batch_size <= args.max_batch_size and seq_len <= args.max_seq_len
     print(args)
     with torch.device(default_device):
         model = Transformer(args, default_dtype)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+    if not use_random_weights:
+        print(datetime.now(), "start load weights")
+        load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+        print(datetime.now(), "load weights finished")
     if re.match(r"npu(\:\d+)?", default_device):
         ctx = amp.autocast(dtype=default_dtype)
     else:
         ctx = nullcontext() if default_device == 'cpu' else torch.amp.autocast(device_type=default_device, dtype=default_dtype)
-    optimizer = configure_optimizers(
-        model,
-        weight_decay,
-        learning_rate,
-        (beta1, beta2)
-    )
+    scaler = amp.GradScaler()
+    optimizer = torch_npu.optim.NpuFusedAdamW(model.parameters(), lr=learning_rate)
     if not use_random_weights:
         print(datetime.now(), "start load weights")
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
@@ -132,23 +99,16 @@ def main(
     iter_num = 0
     while iter_num < max_iters:
         iter_num += 1
-        X, Y = get_batch(tokenizer, args.max_seq_len)
         t0 = datetime.now()
-        # 计算学习率
-        lr = get_lr(iter_num) if decay_lr else learning_rate
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
-        # 对Micro-Batch进行FWD和BWD训练
+        X, Y = get_batch(tokenizer, seq_len)
         with ctx:
-            _, loss = model.forward(X, start_pos=0, targets=Y)
-        loss.backward()
-        optimizer.step()
+            _, loss = model.forward(X, targets=Y)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         optimizer.zero_grad(set_to_none=False)
-        # 输出训练进度(这是CPU-GPU的同步点)
         if iter_num % log_interval == 0:
-            dt = datetime.now() - t0
-            lossf = loss.item()
-            print(f"[{dt*1000:.2f}ms] {iter_num}: loss={lossf:.4f}")
+            print(f"[{(datetime.now() - t0).total_seconds():.2f}s] {iter_num}: loss={loss.item():.4f}")
 
 if __name__ == "__main__":
     parser = ArgumentParser()

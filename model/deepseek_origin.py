@@ -100,7 +100,7 @@ class ParallelEmbedding(nn.Module):
         self.part_vocab_size = (vocab_size // world_size)
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
-        self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+        self.weight = nn.Parameter(torch.rand(self.part_vocab_size, self.dim) * 2 - 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -177,15 +177,15 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        self.weight = nn.Parameter(torch.rand(out_features, in_features, dtype=dtype or Linear.dtype) * 2 - 1)
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
             scale_in_features = (in_features + block_size - 1) // block_size
-            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+            self.weight.scale = self.scale = nn.Parameter(torch.rand(scale_out_features, scale_in_features, dtype=torch.float32) * 2 - 1)
         else:
             self.register_parameter("scale", None)
         if bias:
-            self.bias = nn.Parameter(torch.empty(self.part_out_features))
+            self.bias = nn.Parameter(torch.rand(self.part_out_features) * 2 - 1)
         else:
             self.register_parameter("bias", None)
 
@@ -570,8 +570,8 @@ class Gate(nn.Module):
         self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
         self.route_scale = args.route_scale
-        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
-        self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
+        self.weight = nn.Parameter(torch.rand(args.n_routed_experts, args.dim) * 2 - 1)
+        self.bias = nn.Parameter(torch.rand(args.n_routed_experts) * 2 - 1) if self.dim == 7168 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -801,7 +801,7 @@ class Transformer(nn.Module):
         h = self.norm(h)
         logits = self.head(h) if targets is not None else self.head(h[:, -1])
         if world_size > 1:
-            all_logits = [torch.empty_like(logits) for _ in range(world_size)]
+            all_logits = [torch.rand_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
         if targets is not None:
