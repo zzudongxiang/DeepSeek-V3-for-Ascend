@@ -92,10 +92,6 @@ def main(
         ctx = nullcontext() if default_device == 'cpu' else torch.amp.autocast(device_type=default_device, dtype=default_dtype)
     scaler = amp.GradScaler()
     optimizer = torch_npu.optim.NpuFusedAdamW(model.parameters(), lr=learning_rate)
-    if not use_random_weights:
-        print(datetime.now(), "start load weights")
-        load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-        print(datetime.now(), "load weights finished")
     iter_num = 0
     while iter_num < max_iters:
         iter_num += 1
