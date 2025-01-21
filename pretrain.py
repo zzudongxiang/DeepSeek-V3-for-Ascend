@@ -91,21 +91,20 @@ def main(
         model = DistributedDataParallel(model)
     if re.match(r"npu(\:\d+)?", default_device):
         ctx = amp.autocast(dtype=default_dtype)
+        optimizer = torch_npu.optim.NpuFusedAdamW(model.parameters(), lr=learning_rate)
     else:
         ctx = nullcontext() if default_device == 'cpu' else torch.amp.autocast(device_type=default_device, dtype=default_dtype)
-    scaler = amp.GradScaler()
-    optimizer = torch_npu.optim.NpuFusedAdamW(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     iter_num = 0
     while iter_num < max_iters:
         iter_num += 1
         t0 = datetime.now()
+        optimizer.zero_grad(set_to_none=False)
         X, Y = get_batch(tokenizer, seq_len)
         with ctx:
             _, loss = model.forward(X, targets=Y)
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=False)
+        loss.backward()
+        optimizer.step()
         if iter_num % log_interval == 0:
             print(f"[{(datetime.now() - t0).total_seconds():.2f}s] {iter_num}: loss={loss.item():.4f}")
 
