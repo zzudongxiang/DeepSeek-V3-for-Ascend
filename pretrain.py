@@ -14,6 +14,7 @@ from argparse import ArgumentParser
 from torch.nn import functional as F
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
+from torch.nn.parallel import DistributedDataParallel
 
 from model.utils.tools import sample
 from model.deepseek import writer_finished
@@ -86,6 +87,8 @@ def main(
         print(datetime.now(), "start load weights")
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
         print(datetime.now(), "load weights finished")
+    if world_size > 1:
+        model = DistributedDataParallel(model)
     if re.match(r"npu(\:\d+)?", default_device):
         ctx = amp.autocast(dtype=default_dtype)
     else:
