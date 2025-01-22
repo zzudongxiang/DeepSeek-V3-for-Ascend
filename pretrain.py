@@ -9,7 +9,7 @@ from datetime import datetime
 import torch.distributed as dist
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
-from safetensors.torch import load_model
+from safetensors.torch import load_model, save_model
 
 from model.deepseek import writer_finished
 from model.deepseek_origin import Transformer, ModelArgs
@@ -33,6 +33,8 @@ batch_size = 1
 max_iters = 5000
 log_interval = 10
 learning_rate = 1e-3
+
+best_loss = 1e9
 all_batch = None
 dataset_path = "dataset.txt"
 
@@ -52,10 +54,11 @@ def get_batch(tokenizer, seq_len):
 
 def main(
     ckpt_path: str,
+    ckpt_saved_path: str,
     config: str,
     use_random_weights: bool = False,
 ) -> None:
-    global print
+    global print, best_loss
     rank = int(os.getenv("RANK", "0"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -74,7 +77,6 @@ def main(
     print(args)
     with torch.device(default_device):
         model = Transformer(args, default_dtype)
-    model.train()
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     if not use_random_weights:
         print(datetime.now(), "start load weights")
@@ -85,18 +87,26 @@ def main(
     while iter_num < max_iters:
         iter_num += 1
         t0 = datetime.now()
-        optimizer.zero_grad(set_to_none=False)
+        optimizer.zero_grad()
         X, Y = get_batch(tokenizer, seq_len)
         _, loss = model.forward(X, targets=Y)
         loss.backward()
         optimizer.step()
         if iter_num % log_interval == 0:
             dt, lossf = (datetime.now() - t0).total_seconds(), loss.item()
+            if lossf < best_loss:
+                best_loss = lossf
+                save_path = f"{ckpt_saved_path}/mp{world_size}/model{rank}-mp{world_size}.safetensors"
+                save_dir = os.path.dirname(save_path)
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                save_model(model, save_path)
             print(f"[{dt:.2f}s] {iter_num}: loss={lossf:.8f}")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--ckpt-path", type=str, required=True)
+    parser.add_argument("--ckpt-saved-path", type=str, required=True)
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--local-rank", type=int, default=0)
     parser.add_argument("--use-random-weights", action="store_true")
@@ -107,7 +117,7 @@ if __name__ == "__main__":
     try:
         if world_size > 1:
             dist.init_process_group("nccl")
-        main(args.ckpt_path, args.config, args.use_random_weights)
+        main(args.ckpt_path, args.ckpt_saved_path, args.config, args.use_random_weights)
     except Exception as e:
         raise e
     finally:

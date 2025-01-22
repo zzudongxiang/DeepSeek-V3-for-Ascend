@@ -50,6 +50,7 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "--ckpt-path", "ckpt",
+                "--ckpt-saved-path", "ckpt-saved",
                 "--config", "configs/config_16B.json",
                 "--use-random-weights",
             ]
@@ -72,6 +73,7 @@
                 "--master_port", "6001",
                 "pretrain.py",
                 "--ckpt-path", "ckpt",
+                "--ckpt-saved-path", "ckpt-saved",
                 "--config", "configs/config_16B.json",
                 "--use-random-weights",
             ]

@@ -36,7 +36,8 @@ DISTRIBUTED_ARGS="
 "
 
 torchrun $DISTRIBUTED_ARGS pretrain.py              \
-    --ckpt-path ckpt-ep256-mp32/                    \
+    --ckpt-path ../ckpt-ep256-mp32/                 \
+    --ckpt-saved-path ckpt-saved/                   \
     --input-file scripts/shakespeare.txt            \
     --config configs/config_671B.json               \
     | tee log/pretrain-multi-npu.log
