@@ -4,6 +4,7 @@ import os
 import json
 import torch
 import numpy as np
+from torch import nn
 from typing import Literal
 from datetime import datetime
 import torch.distributed as dist
@@ -83,6 +84,10 @@ def main(
         print(datetime.now(), "start load weights")
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
         print(datetime.now(), "load weights finished")
+    else:
+        for _, weight in model.named_parameters():
+            if weight is not None:
+                nn.init.xavier_normal_(weight)
     iter_num = 0
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     ctx = nullcontext() if default_device == 'cpu' else amp.autocast(dtype=default_dtype)
