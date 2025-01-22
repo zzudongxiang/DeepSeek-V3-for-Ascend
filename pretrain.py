@@ -7,6 +7,7 @@ import numpy as np
 from typing import Literal
 from datetime import datetime
 import torch.distributed as dist
+from contextlib import nullcontext
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
 from safetensors.torch import load_model, save_model
@@ -16,7 +17,7 @@ from model.deepseek_origin import Transformer, ModelArgs
 
 # BUG: 暂时不支持bf16的混合精度训练
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
-default_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}["float16"]
+default_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}["float32"]
 
 try:
     import torch_npu
@@ -69,12 +70,11 @@ def main(
     else:
         torch.cuda.set_device(local_rank)
     torch.set_default_dtype(default_dtype)
-    torch.set_num_threads(8)
-    torch.manual_seed(965)
+    torch.manual_seed(1234)
     with open(config) as f:
         args = ModelArgs(**json.load(f))
-    assert batch_size <= args.max_batch_size and seq_len <= args.max_seq_len
     print(args)
+    assert batch_size <= args.max_batch_size and seq_len <= args.max_seq_len
     with torch.device(default_device):
         model = Transformer(args, default_dtype)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
@@ -84,19 +84,21 @@ def main(
         print(datetime.now(), "load weights finished")
     iter_num = 0
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    ctx = nullcontext() if default_device == 'cpu' else amp.autocast(dtype=default_dtype)
     while iter_num < max_iters:
         iter_num += 1
         t0 = datetime.now()
         optimizer.zero_grad()
         X, Y = get_batch(tokenizer, seq_len)
-        _, loss = model.forward(X, targets=Y)
+        with ctx:
+            _, loss = model.forward(X, targets=Y)
         loss.backward()
         optimizer.step()
         if iter_num % log_interval == 0:
             dt, lossf = (datetime.now() - t0).total_seconds(), loss.item()
             if lossf < best_loss:
                 best_loss = lossf
-                save_path = f"{ckpt_saved_path}/mp{world_size}/model{rank}-mp{world_size}.safetensors"
+                save_path = f"{ckpt_saved_path}/mp{world_size}/iter{iter_num}/model{rank}-mp{world_size}.safetensors"
                 save_dir = os.path.dirname(save_path)
                 if not os.path.exists(save_dir):
                     os.makedirs(save_dir)

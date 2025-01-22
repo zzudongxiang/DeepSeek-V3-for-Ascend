@@ -11,6 +11,10 @@
             "program": "inference.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
+            "env": {
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
+            },
             "args": [
                 "--ckpt-path", "ckpt",
                 "--config", "configs/config_16B.json",
@@ -25,7 +29,8 @@
             "module": "torch.distributed.launch",
             "console": "integratedTerminal",
             "env": {
-                "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
             },
             "cwd": "${workspaceFolder}",
             "args": [
@@ -48,6 +53,10 @@
             "program": "pretrain.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
+            "env": {
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
+            },
             "args": [
                 "--ckpt-path", "ckpt",
                 "--ckpt-saved-path", "ckpt-saved",
@@ -62,7 +71,8 @@
             "module": "torch.distributed.launch",
             "console": "integratedTerminal",
             "env": {
-                "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
             },
             "cwd": "${workspaceFolder}",
             "args": [

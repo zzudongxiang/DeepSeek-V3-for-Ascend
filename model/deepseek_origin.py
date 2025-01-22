@@ -401,7 +401,7 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     t = torch.arange(seqlen)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    freqs_cis = torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1).view(*freqs.shape, 2)
+    # freqs_cis = torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1).view(*freqs.shape, 2)
     return freqs_cis
 
 
@@ -839,7 +839,8 @@ class Transformer(nn.Module):
         """
         seqlen = tokens.size(1)
         h = self.embed(tokens)
-        freqs_cis = torch.complex(self.freqs_cis[start_pos:start_pos+seqlen][...,0], self.freqs_cis[start_pos:start_pos+seqlen][...,1])
+        # freqs_cis = torch.complex(self.freqs_cis[start_pos:start_pos+seqlen][...,0], self.freqs_cis[start_pos:start_pos+seqlen][...,1])
+        freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
