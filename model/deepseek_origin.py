@@ -131,6 +131,7 @@ class ParallelEmbedding(nn.Module):
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+        nn.init.xavier_normal_(self.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -208,14 +209,17 @@ class Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        nn.init.xavier_normal_(self.weight)
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
             scale_in_features = (in_features + block_size - 1) // block_size
             self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+            nn.init.xavier_normal_(self.scale)
         else:
             self.register_parameter("scale", None)
         if bias:
             self.bias = nn.Parameter(torch.empty(self.part_out_features))
+            nn.init.xavier_normal_(self.bias)
         else:
             self.register_parameter("bias", None)
 
@@ -618,7 +622,9 @@ class Gate(nn.Module):
         self.score_func = args.score_func
         self.route_scale = args.route_scale
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
+        nn.init.xavier_normal_(self.weight)
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
+        nn.init.xavier_normal_(self.bias) if self.bias is not None else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """

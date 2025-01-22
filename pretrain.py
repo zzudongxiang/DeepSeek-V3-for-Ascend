@@ -12,12 +12,13 @@ from argparse import ArgumentParser
 from transformers import AutoTokenizer
 from safetensors.torch import load_model, save_model
 
+from model.utils.tools import sample
 from model.deepseek import writer_finished
 from model.deepseek_origin import Transformer, ModelArgs
 
 # BUG: 暂时不支持bf16的混合精度训练
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
-default_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}["float32"]
+default_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}["float16"]
 
 try:
     import torch_npu
@@ -91,7 +92,7 @@ def main(
         optimizer.zero_grad()
         X, Y = get_batch(tokenizer, seq_len)
         with ctx:
-            _, loss = model.forward(X, targets=Y)
+            logits, loss = model.forward(X, targets=Y)
         loss.backward()
         optimizer.step()
         if iter_num % log_interval == 0:
@@ -101,8 +102,12 @@ def main(
                 save_path = f"{ckpt_saved_path}/mp{world_size}/iter{iter_num}/model{rank}-mp{world_size}.safetensors"
                 save_dir = os.path.dirname(save_path)
                 if not os.path.exists(save_dir):
-                    os.makedirs(save_dir)
+                    os.makedirs(save_dir, exist_ok=True)
                 save_model(model, save_path)
+                y = str(tokenizer.decode(Y[0], skip_special_tokens=True)).replace("\n", "\\n")
+                y_hat = str(tokenizer.decode(sample(logits)[0], skip_special_tokens=True)).replace("\n", "\\n")
+                print(f"Target   >> {y}")
+                print(f"DeekSeek >> {y_hat}")
             print(f"[{dt:.2f}s] {iter_num}: loss={lossf:.8f}")
 
 if __name__ == "__main__":
