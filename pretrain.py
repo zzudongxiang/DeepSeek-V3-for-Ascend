@@ -3,21 +3,16 @@
 import re
 import os
 import json
-import math
 import torch
 import numpy as np
 from typing import Literal
 from datetime import datetime
 import torch.distributed as dist
-from contextlib import nullcontext
 from argparse import ArgumentParser
-from torch.nn import functional as F
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 from torch.nn.parallel import DistributedDataParallel
 
-from model.utils.tools import sample
-from model.deepseek import writer_finished
 from model.deepseek_origin import Transformer, ModelArgs
 
 # BUG: 暂时不支持bf16的混合精度训练
@@ -90,27 +85,18 @@ def main(
     if world_size > 1:
         model = DistributedDataParallel(model)
     if re.match(r"npu(\:\d+)?", default_device):
-        ctx = amp.autocast(dtype=default_dtype)
         optimizer = torch_npu.optim.NpuFusedSGD(model.parameters(), lr=learning_rate)
     else:
-        ctx = nullcontext() if default_device == 'cpu' else torch.amp.autocast(device_type=default_device, dtype=default_dtype)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    scaler = None # amp.GradScaler()
     iter_num = 0
     while iter_num < max_iters:
         iter_num += 1
         t0 = datetime.now()
         optimizer.zero_grad(set_to_none=False)
         X, Y = get_batch(tokenizer, seq_len)
-        with ctx:
-            _, loss = model.forward(X, targets=Y)
-        if scaler is None:
-            loss.backward()
-            optimizer.step()
-        else:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+        _, loss = model.forward(X, targets=Y)
+        loss.backward()
+        optimizer.step()
         if iter_num % log_interval == 0:
             lossf = loss.item()
             dt = (datetime.now() - t0).total_seconds()
@@ -125,9 +111,4 @@ if __name__ == "__main__":
     parser.add_argument("--input-file", type=str, default="scripts/shakespeare.txt")
     args = parser.parse_args()
     dataset_path = args.input_file
-    try:
-        main(args.ckpt_path, args.config, args.use_random_weights)
-    except Exception as e:
-        raise e
-    finally:
-        writer_finished()
+    main(args.ckpt_path, args.config, args.use_random_weights)

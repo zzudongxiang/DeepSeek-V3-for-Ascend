@@ -54,5 +54,27 @@
                 "--use-random-weights",
             ]
         },
+        {
+            "name": "Pretrain-Multi-NPU",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.launch",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--nproc_per_node", "8",
+                "--nnodes", "1",
+                "--node_rank", "0",
+                "--master_addr", "localhost",
+                "--master_port", "6001",
+                "pretrain.py",
+                "--ckpt-path", "ckpt",
+                "--config", "configs/config_16B.json",
+                "--use-random-weights",
+            ]
+        },
     ]
 }
