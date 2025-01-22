@@ -91,10 +91,11 @@ def main(
         model = DistributedDataParallel(model)
     if re.match(r"npu(\:\d+)?", default_device):
         ctx = amp.autocast(dtype=default_dtype)
-        optimizer = torch_npu.optim.NpuFusedAdamW(model.parameters(), lr=learning_rate)
+        optimizer = torch_npu.optim.NpuFusedSGD(model.parameters(), lr=learning_rate)
     else:
         ctx = nullcontext() if default_device == 'cpu' else torch.amp.autocast(device_type=default_device, dtype=default_dtype)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    scaler = None # amp.GradScaler()
     iter_num = 0
     while iter_num < max_iters:
         iter_num += 1
@@ -103,10 +104,17 @@ def main(
         X, Y = get_batch(tokenizer, seq_len)
         with ctx:
             _, loss = model.forward(X, targets=Y)
-        loss.backward()
-        optimizer.step()
+        if scaler is None:
+            loss.backward()
+            optimizer.step()
+        else:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         if iter_num % log_interval == 0:
-            print(f"[{(datetime.now() - t0).total_seconds():.2f}s] {iter_num}: loss={loss.item():.4f}")
+            lossf = loss.item()
+            dt = (datetime.now() - t0).total_seconds()
+            print(f"[{dt:.2f}s] {iter_num}: loss={lossf:.4f}")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
