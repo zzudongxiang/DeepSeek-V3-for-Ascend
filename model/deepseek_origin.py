@@ -6,6 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from torch.autograd import Function
 
 from model.kernel import act_quant, weight_dequant, fp8_gemm
 
@@ -83,6 +84,35 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
 
+class AllReduce(Function):
+    @staticmethod
+    def forward(ctx, input):
+        output = input.clone()
+        dist.all_reduce(output, op=dist.ReduceOp.SUM)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+
+class AllGather(Function):
+    @staticmethod
+    def forward(ctx, input):
+        world_size = dist.get_world_size()
+        local_rank = dist.get_rank()
+        gather_list = [torch.empty_like(input) for _ in range(world_size)]
+        dist.all_gather(gather_list, input)
+        output = torch.cat(gather_list, dim=-1)
+        ctx.world_size = world_size
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # 将总梯度按分片维度切割，返回当前rank对应的梯度部分
+        world_size = ctx.world_size
+        dim_size = grad_output.size(-1) // world_size
+        start = dist.get_rank() * dim_size
+        return grad_output[..., start:start+dim_size].contiguous()
 
 class ParallelEmbedding(nn.Module):
     """
@@ -100,7 +130,7 @@ class ParallelEmbedding(nn.Module):
         self.part_vocab_size = (vocab_size // world_size)
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
-        self.weight = nn.Parameter(torch.rand(self.part_vocab_size, self.dim) - 0.5)
+        self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -122,7 +152,7 @@ class ParallelEmbedding(nn.Module):
         y = F.embedding(x, self.weight)
         if world_size > 1:
             y[mask] = 0
-            dist.all_reduce(y)
+            y = AllReduce.apply(y)
         return y
 
 
@@ -177,15 +207,15 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.rand(out_features, in_features, dtype=dtype or Linear.dtype) - 0.5)
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
             scale_in_features = (in_features + block_size - 1) // block_size
-            self.weight.scale = self.scale = nn.Parameter(torch.rand(scale_out_features, scale_in_features, dtype=torch.float32) - 0.5)
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
         else:
             self.register_parameter("scale", None)
         if bias:
-            self.bias = nn.Parameter(torch.rand(self.part_out_features) - 0.5)
+            self.bias = nn.Parameter(torch.empty(self.part_out_features))
         else:
             self.register_parameter("bias", None)
 
@@ -258,7 +288,7 @@ class RowParallelLinear(Linear):
         """
         y = linear(x, self.weight)
         if world_size > 1:
-            dist.all_reduce(y)
+            y = AllReduce.apply(y)
         if self.bias is not None:
             y += self.bias
         return y
@@ -587,8 +617,8 @@ class Gate(nn.Module):
         self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
         self.route_scale = args.route_scale
-        self.weight = nn.Parameter(torch.rand(args.n_routed_experts, args.dim) - 0.5)
-        self.bias = nn.Parameter(torch.rand(args.n_routed_experts) - 0.5) if self.dim == 7168 else None
+        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
+        self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -716,7 +746,7 @@ class MoE(nn.Module):
             y[idx] += expert(x[idx]) * weights[idx, top, None]
         z = self.shared_experts(x)
         if world_size > 1:
-            dist.all_reduce(y)
+            y = AllReduce.apply(y)
         return (y + z).view(shape)
 
 
@@ -818,9 +848,7 @@ class Transformer(nn.Module):
         h = self.norm(h)
         logits = self.head(h) if targets is not None else self.head(h[:, -1])
         if world_size > 1:
-            all_logits = [torch.rand_like(logits) for _ in range(world_size)]
-            dist.all_gather(all_logits, logits)
-            logits = torch.cat(all_logits, dim=-1)
+            logits = AllGather.apply(logits)
         if targets is not None:
             return logits, F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:

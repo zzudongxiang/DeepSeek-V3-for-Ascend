@@ -1,6 +1,5 @@
 #!/bin/python
 
-import re
 import os
 import json
 import torch
@@ -11,8 +10,8 @@ import torch.distributed as dist
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
-from torch.nn.parallel import DistributedDataParallel
 
+from model.deepseek import writer_finished
 from model.deepseek_origin import Transformer, ModelArgs
 
 # BUG: 暂时不支持bf16的混合精度训练
@@ -31,9 +30,9 @@ except:
 
 seq_len = 1024
 batch_size = 1
-max_iters = 100
-log_interval = 1
-learning_rate = 1e-6
+max_iters = 5000
+log_interval = 10
+learning_rate = 1e-3
 all_batch = None
 dataset_path = "dataset.txt"
 
@@ -56,12 +55,10 @@ def main(
     config: str,
     use_random_weights: bool = False,
 ) -> None:
+    global print
     rank = int(os.getenv("RANK", "0"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
-    if world_size > 1:
-        dist.init_process_group("nccl")
-    global print
     if rank != 0:
         print = lambda *_, **__: None
     if default_device == "npu":
@@ -77,18 +74,14 @@ def main(
     print(args)
     with torch.device(default_device):
         model = Transformer(args, default_dtype)
+    model.train()
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     if not use_random_weights:
         print(datetime.now(), "start load weights")
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
         print(datetime.now(), "load weights finished")
-    if world_size > 1:
-        model = DistributedDataParallel(model)
-    if re.match(r"npu(\:\d+)?", default_device):
-        optimizer = torch_npu.optim.NpuFusedSGD(model.parameters(), lr=learning_rate)
-    else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     iter_num = 0
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     while iter_num < max_iters:
         iter_num += 1
         t0 = datetime.now()
@@ -98,9 +91,8 @@ def main(
         loss.backward()
         optimizer.step()
         if iter_num % log_interval == 0:
-            lossf = loss.item()
-            dt = (datetime.now() - t0).total_seconds()
-            print(f"[{dt:.2f}s] {iter_num}: loss={lossf:.4f}")
+            dt, lossf = (datetime.now() - t0).total_seconds(), loss.item()
+            print(f"[{dt:.2f}s] {iter_num}: loss={lossf:.8f}")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -111,4 +103,14 @@ if __name__ == "__main__":
     parser.add_argument("--input-file", type=str, default="scripts/shakespeare.txt")
     args = parser.parse_args()
     dataset_path = args.input_file
-    main(args.ckpt_path, args.config, args.use_random_weights)
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    try:
+        if world_size > 1:
+            dist.init_process_group("nccl")
+        main(args.ckpt_path, args.config, args.use_random_weights)
+    except Exception as e:
+        raise e
+    finally:
+        if world_size > 1:
+            dist.destroy_process_group()
+        writer_finished()
