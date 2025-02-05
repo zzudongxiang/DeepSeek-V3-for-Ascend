@@ -17,7 +17,7 @@ flops_writer_enabled = False
 memory_writer_enabled = False
 weights_writer_enabled = False
 tensor_hist_writer_enabled = False
-gemm_impl: Literal["bf16", "fp8"] = "bf16"
+gemm_impl: Literal["bf16", "fp8"] = "fp8"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
 xccl_writer = flops_writer = memory_writer = weights_writer = None
@@ -112,16 +112,22 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         tensor_hist_recoder(rank, "linear", "y", y)
         return y
     elif gemm_impl == "bf16":
-        weight = weight_dequant(weight, weight.scale)
+        deq_weight = weight_dequant(weight, weight.scale)
         flops_recoder("linear", "GEMM", x, weight, bias, weight.scale)
-        y = F.linear(x, weight, bias)
+        y = F.linear(x, deq_weight, bias)
         tensor_hist_recoder(rank, "linear", "y", y)
         return y
     else:
-        x, scale = act_quant(x, block_size)
-        y = fp8_gemm(x, scale, weight, weight.scale)
-        if bias is not None:
-            y += bias
+        # 原始方案
+        # x, scale = act_quant(x, block_size)
+        # y = fp8_gemm(x, scale, weight, weight.scale)
+        # if bias is not None:
+        #     y += bias
+
+        # torch_npu方案
+        import torch_npu
+        y = torch_npu.npu_quant_matmul(x.to(torch.int8), weight.T, torch.ones(1,).to("npu"), bias=bias, output_dtype=torch.bfloat16)
+
         flops_recoder("linear", "GEMM", x, weight, bias, weight.scale)
         tensor_hist_recoder(rank, "linear", "y", y)
         return y
@@ -134,7 +140,12 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        if dtype == torch.bfloat16 or dtype == torch.float16:
+            # 只有float类型支持梯度
+            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        else:
+            # 对于量化的非float数据类型仅支持推理场景
+            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         memory_recoder("Linear", "init", "malloc", "weight", self.weight)
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
@@ -500,7 +511,14 @@ class Transformer(nn.Module):
         memory_writer = Memory_Writer(rank) if memory_writer_enabled else None
         flops_writer = FLOPs_Writer(rank) if flops_writer_enabled else None
         xccl_writer = XCCL_Writer(rank) if xccl_writer_enabled else None
-        Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
+        if args.dtype == "fp8":
+            Linear.dtype = torch.float8_e4m3fn
+        elif args.dtype == "bf16":
+            Linear.dtype = torch.bfloat16
+        elif args.dtype == "int8":
+            Linear.dtype = torch.int8
+        else:
+            Linear.dtype = torch.float16
         super().__init__()
         self.max_seq_len = args.max_seq_len
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
