@@ -17,7 +17,7 @@ flops_writer_enabled = False
 memory_writer_enabled = False
 weights_writer_enabled = False
 tensor_hist_writer_enabled = False
-gemm_impl: Literal["bf16", "fp8"] = "fp8"
+gemm_impl: Literal["bf16", "fp8"] = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
 xccl_writer = flops_writer = memory_writer = weights_writer = None
@@ -112,7 +112,8 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         tensor_hist_recoder(rank, "linear", "y", y)
         return y
     elif gemm_impl == "bf16":
-        deq_weight = weight_dequant(weight, weight.scale)
+        # deq_weight = weight_dequant(weight, weight.scale)
+        deq_weight = weight.to(torch.bfloat16) * weight.scale.view(-1)[0]
         flops_recoder("linear", "GEMM", x, weight, bias, weight.scale)
         y = F.linear(x, deq_weight, bias)
         tensor_hist_recoder(rank, "linear", "y", y)
@@ -126,7 +127,12 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
 
         # torch_npu方案
         import torch_npu
-        y = torch_npu.npu_quant_matmul(x.to(torch.int8), weight.T, torch.ones(1,).to("npu"), bias=bias, output_dtype=torch.bfloat16)
+        max_val = torch.max(torch.abs(x))
+        assert max_val > 0
+        scale = (max_val / 127.0)
+        quantized_x = torch.clamp(torch.round(x / scale), min=-128, max=127)
+        y = torch_npu.npu_quant_matmul(quantized_x.to(torch.int8), weight.T, torch.ones(1,).to("npu"), bias=bias, output_dtype=torch.int32)
+        y = y * scale * weight.scale.view(-1)[0]
 
         flops_recoder("linear", "GEMM", x, weight, bias, weight.scale)
         tensor_hist_recoder(rank, "linear", "y", y)

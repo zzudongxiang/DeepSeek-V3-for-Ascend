@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
 from model.utils.tools import sample
-from model.deepseek import Transformer, ModelArgs
+from model.deepseek_origin import Transformer, ModelArgs
 from model.deepseek import writer_finished, writer_split, print_flops
 
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
@@ -113,8 +113,8 @@ def main(
     with torch.device(default_device):
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    if not profiling:
-        tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
+    # if not profiling:
+    #     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     if not use_random_weights:
         print(datetime.now(), "start load weights")
         load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))

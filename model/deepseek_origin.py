@@ -14,7 +14,7 @@ from model.kernel import act_quant, weight_dequant, fp8_gemm
 rank = 0
 world_size = 1
 block_size = 128
-gemm_impl: Literal["bf16", "fp8"] = "bf16"
+gemm_impl: Literal["bf16", "fp8"] = "fp8"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
 @dataclass
@@ -181,13 +181,28 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
     if weight.element_size() > 1:
         return F.linear(x, weight, bias)
     elif gemm_impl == "bf16":
-        weight = weight_dequant(weight, weight.scale)
+        # 原始方案
+        # weight = weight_dequant(weight, weight.scale)
+
+        # 使用全局的去量化方法
+        weight = weight.to(torch.bfloat16) * weight.scale.view(-1)[0]
         return F.linear(x, weight, bias)
     else:
-        x, scale = act_quant(x, block_size)
-        y = fp8_gemm(x, scale, weight, weight.scale)
-        if bias is not None:
-            y += bias
+        # 原始方案
+        # x, scale = act_quant(x, block_size)
+        # y = fp8_gemm(x, scale, weight, weight.scale)
+        # if bias is not None:
+        #     y += bias
+
+        # torch_npu方案
+        import torch_npu
+        max_val = torch.max(torch.abs(x))
+        assert max_val > 0
+        scale = (max_val / 127.0)
+        quantized_x = torch.clamp(torch.round(x / scale), min=-128, max=127)
+        y = torch_npu.npu_quant_matmul(quantized_x.to(torch.int8), weight.T, torch.ones(1,).to("npu"), bias=bias, output_dtype=torch.int32)
+        y = (y.to(torch.bfloat16) * scale * weight.scale.view(-1)[0]).to(torch.bfloat16)
+
         return y
 
 
@@ -207,7 +222,12 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        if dtype == torch.bfloat16 or dtype == torch.float16:
+            # 只有float类型支持梯度
+            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        else:
+            # 对于量化的非float数据类型仅支持推理场景
+            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
             scale_in_features = (in_features + block_size - 1) // block_size
@@ -815,7 +835,14 @@ class Transformer(nn.Module):
         default_dtype = dtype
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
-        Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else dtype
+        if args.dtype == "fp8":
+            Linear.dtype = torch.float8_e4m3fn
+        elif args.dtype == "bf16":
+            Linear.dtype = torch.bfloat16
+        elif args.dtype == "int8":
+            Linear.dtype = torch.int8
+        else:
+            Linear.dtype = torch.float16
         super().__init__()
         self.max_seq_len = args.max_seq_len
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
