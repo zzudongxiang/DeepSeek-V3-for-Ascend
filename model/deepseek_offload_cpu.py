@@ -15,6 +15,7 @@ from model.utils.writer import FLOPs_Writer, XCCL_Writer, Memory_Writer, Weights
 world_size = 1
 rank = 0
 block_size = 128
+default_device = "npu"
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
@@ -161,7 +162,6 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         if x.is_cpu and not cpu_gemm_support:
             # aarch的CPU计算linear存在问题，需要转到NPU上进行计算
             # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC1/comref/comaq/commonqa_0021.html
-            default_device = "npu"
             x = x.to(default_device)
             weight = weight.to(default_device)
             bias = bias.to(default_device) if bias is not None else None
@@ -711,7 +711,7 @@ class MoE(nn.Module):
             # 修改点2: 数据在GPU和CPU间移动
             idx, top = torch.where(indices == i)
             x_cpu = x[idx].detach().cpu()  # 移动输入到CPU
-            y_cpu = expert(x_cpu) * weights[idx, top, None]
+            y_cpu = expert(x_cpu).to(default_device) * weights[idx, top, None]
             y[idx] += y_cpu.to(x.device)  # 结果移回GPU
         z = self.shared_experts(x)
         if world_size > 1:
