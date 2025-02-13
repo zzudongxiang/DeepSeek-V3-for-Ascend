@@ -1,12 +1,14 @@
 import math
+from dataclasses import dataclass
+from typing import Tuple, Optional, Literal
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from dataclasses import dataclass
-from typing import Tuple, Optional, Literal
 
-from model.kernel import act_quant, weight_dequant, fp8_gemm
+from model.utils.tools import weight_dequant_cpu
+from model.utils.kernel import act_quant, weight_dequant, fp8_gemm
 from model.utils.writer import FLOPs_Writer, XCCL_Writer, Memory_Writer, Weights_Writer, tensor_hist
 
 rank = 0

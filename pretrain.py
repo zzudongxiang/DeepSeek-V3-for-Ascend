@@ -2,20 +2,22 @@
 
 import os
 import json
+from argparse import ArgumentParser
+from typing import List
+
 import torch
-import numpy as np
-from torch import nn
-from typing import Literal
 from datetime import datetime
 import torch.distributed as dist
-from contextlib import nullcontext
-from argparse import ArgumentParser
 from transformers import AutoTokenizer
 from safetensors.torch import load_model, save_model
 
+import numpy as np
+from torch import nn
+from typing import Literal
+from contextlib import nullcontext
+
 from model.utils.tools import sample
-from model.deepseek import writer_finished
-from model.deepseek_origin import Transformer, ModelArgs
+from model.deepseek_pretrain import Transformer, ModelArgs
 
 # BUG: 暂时不支持bf16的混合精度训练
 default_device: Literal["cuda", "npu", "cpu"] = "cuda"
@@ -25,7 +27,7 @@ try:
     import torch_npu
     from torch_npu.npu import amp
     import mindspeed.megatron_adaptor
-    default_device = "npu" # npu:7
+    default_device = "npu"
 except:
     from torch import amp
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -135,4 +137,3 @@ if __name__ == "__main__":
     finally:
         if world_size > 1:
             dist.destroy_process_group()
-        writer_finished()

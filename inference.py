@@ -2,20 +2,19 @@
 
 import os
 import json
-import torch
+from argparse import ArgumentParser
 from typing import List
-from typing import Literal
+
+import torch
 from datetime import datetime
 import torch.distributed as dist
-from argparse import ArgumentParser
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
 from model.utils.tools import sample
-from model.deepseek_origin import Transformer, ModelArgs
-from model.deepseek import writer_finished, writer_split, print_flops
+from model.deepseek_offload_cpu import Transformer, ModelArgs
 
-default_device: Literal["cuda", "npu", "cpu"] = "cuda"
+default_device = "cuda"
 
 try:
     import torch_npu
@@ -33,7 +32,6 @@ def generate(
     eos_id: int,
     temperature: float = 1.0
 ) -> List[List[int]]:
-    rank = int(os.getenv("RANK", "0"))
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
@@ -43,13 +41,8 @@ def generate(
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device=default_device)
     prompt_mask = tokens != -1
-    start = datetime.now()
-    print_flops(flush_only=True)
     for cur_pos in range(min(prompt_lens), total_len):
-        logits, _ = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
-        if prev_pos == 0:
-            t0 = datetime.now()
-            writer_split()
+        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
         if temperature > 0:
             next_token = sample(logits, temperature)
         else:
@@ -60,25 +53,12 @@ def generate(
         prev_pos = cur_pos
         if finished.all():
             break
-    end = datetime.now()
-    if rank == 0:
-        prefill_lens = min(prompt_lens)
-        ttft = (t0 - start).total_seconds()
-        decode_time = (end - t0).total_seconds()
-        decode_lens = (cur_pos - prefill_lens + 1) * len(prompt_tokens)
-        throughput = decode_lens / decode_time
-        print(f"TTFT: {ttft:.4f} seconds for {prefill_lens} tokens")
-        print(f"Throughput: {throughput:.2f} tokens/s ({decode_time:.2f} seconds for {decode_lens} tokens)")
-        speed, flops, dur, cube_flops, vector_flops = print_flops()
-        # print(f"{ttft},{prefill_lens},{throughput},{decode_time},{decode_lens},{speed},{flops},{dur},{cube_flops},{vector_flops}")
-        print("-" * 50)
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
         toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
         if eos_id in toks:
             toks = toks[:toks.index(eos_id)]
         completion_tokens.append(toks)
-    writer_finished()
     return completion_tokens
 
 
@@ -89,8 +69,6 @@ def main(
     interactive: bool = True,
     max_new_tokens: int = 100,
     temperature: float = 1.0,
-    use_random_weights: bool = False,
-    profiling: bool = False,
 ) -> None:
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
@@ -113,12 +91,13 @@ def main(
     with torch.device(default_device):
         model = Transformer(args)
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    # if not profiling:
-    #     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
-    if not use_random_weights:
-        print(datetime.now(), "start load weights")
-        load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-        print(datetime.now(), "load weights finished")
+    now = datetime.now()
+    tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
+    print(datetime.now(), f"Prepare DeepSeek Model in {(datetime.now() - now).total_seconds()} sec")
+
+    now = datetime.now()
+    load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+    print(datetime.now(), f"Load DeepSeek Weight in {(datetime.now() - now).total_seconds() / 60.0} min")
 
     if interactive:
         messages = []
@@ -168,17 +147,6 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--profiling", action="store_true") # 是否抓取Trace
-    parser.add_argument("--local-rank", type=int, default=0) # 为了防止Debug的时候自动添加该参数导致报错
-    parser.add_argument("--use-random-weights", action="store_true") # 是否使用随机数加载权重
     args = parser.parse_args()
     assert args.input_file or args.interactive
-    if args.profiling:
-        from torch.profiler import profile, ProfilerActivity
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler("log"),
-        ) as prof:
-            main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.use_random_weights, args.profiling)
-    else:
-        main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.use_random_weights)
+    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)

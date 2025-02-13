@@ -1,4 +1,4 @@
-import re, math
+import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
 
@@ -8,8 +8,9 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.autograd import Function
 
-from model.kernel import act_quant, weight_dequant, fp8_gemm
-
+from model.utils.tools import weight_dequant_cpu
+from model.utils.kernel import act_quant, weight_dequant, fp8_gemm
+from model.utils.writer import FLOPs_Writer, XCCL_Writer, Memory_Writer, Weights_Writer, tensor_hist
 
 rank = 0
 world_size = 1
@@ -181,28 +182,14 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
     if weight.element_size() > 1:
         return F.linear(x, weight, bias)
     elif gemm_impl == "bf16":
-        # 原始方案
-        # weight = weight_dequant(weight, weight.scale)
-
-        # 使用全局的去量化方法
-        weight = weight.to(torch.bfloat16) * weight.scale.view(-1)[0]
+        weight = weight_dequant(weight, weight.scale)
         return F.linear(x, weight, bias)
     else:
-        # 原始方案
-        # x, scale = act_quant(x, block_size)
-        # y = fp8_gemm(x, scale, weight, weight.scale)
-        # if bias is not None:
-        #     y += bias
-
-        # torch_npu方案
-        import torch_npu
-        max_val = torch.max(torch.abs(x))
-        assert max_val > 0
-        scale = (max_val / 127.0)
-        quantized_x = torch.clamp(torch.round(x / scale), min=-128, max=127)
-        y = torch_npu.npu_quant_matmul(quantized_x.to(torch.int8), weight.T, torch.ones(1,).to("npu"), bias=bias, output_dtype=torch.int32)
-        y = (y.to(torch.bfloat16) * scale * weight.scale.view(-1)[0]).to(torch.bfloat16)
-
+        assert "Unsupport gemm impl"
+        x, scale = act_quant(x, block_size)
+        y = fp8_gemm(x, scale, weight, weight.scale)
+        if bias is not None:
+            y += bias
         return y
 
 

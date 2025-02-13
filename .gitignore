@@ -1,9 +1,11 @@
 .ipynb_checkpoints
 __pycache__
 model_*.*
+logs/
 log/
 
 fusion_result.json
 kernel_meta/
 extra-info/
 ckpt-saved/
+dump/

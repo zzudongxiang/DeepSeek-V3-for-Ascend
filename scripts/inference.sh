@@ -35,8 +35,10 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 
+# ../ckpt/r1-fp8-mp8
+# ../ckpt/v3-bf16-mp32
 torchrun $DISTRIBUTED_ARGS inference.py             \
-    --ckpt-path ../ckpt-ep256-mp16-int8             \
+    --ckpt-path ../ckpt/r1-fp8-mp8                  \
     --input-file scripts/inputs.txt                 \
     --config configs/config_671B.json               \
     | tee log/inference-multi-npu.log
