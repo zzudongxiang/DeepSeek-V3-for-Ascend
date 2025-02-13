@@ -125,7 +125,7 @@ cd ~/llm
 git clone https://github.com/NVIDIA/Megatron-LM.git
 # 检出与后续MindSpeed匹配的分支
 cd Megatron-LM
-git checkout core_r0.7.0
+git checkout core_r0.8.0
 ```
 
 ### 3.2 安装Megatron-LM
@@ -167,7 +167,7 @@ cd ~/llm
 git clone https://gitee.com/ascend/MindSpeed.git
 # 切换到与Megatron-LM版本一致的分支
 cd MindSpeed
-git checkout 4045864e6df
+git checkout 9b3ad3fd928
 ```
 
 ### 4.2 安装MindSpeed

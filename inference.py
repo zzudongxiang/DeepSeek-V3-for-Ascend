@@ -80,7 +80,7 @@ def main(
         print = lambda *_, **__: None
     if default_device == "npu":
         torch_npu.npu.set_device(local_rank)
-    else:
+    elif default_device == "cuda":
         torch.cuda.set_device(local_rank)
     torch.set_default_dtype(torch.bfloat16)
     torch.set_num_threads(8)
