@@ -2,6 +2,8 @@
 set -e
 mkdir -p log
 
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
