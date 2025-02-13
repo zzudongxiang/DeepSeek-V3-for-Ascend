@@ -93,11 +93,13 @@ def main(
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     now = datetime.now()
     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
-    print(datetime.now(), f"Prepare DeepSeek Model in {(datetime.now() - now).total_seconds()} sec")
+    dur = (datetime.now() - now).total_seconds()
+    print(datetime.now(), f"Prepare DeepSeek Model in {dur:.2f} sec")
 
     now = datetime.now()
     load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-    print(datetime.now(), f"Load DeepSeek Weight in {(datetime.now() - now).total_seconds() / 60.0} min")
+    dur = (datetime.now() - now).total_seconds() / 60.0
+    print(datetime.now(), f"Load DeepSeek Weight in {dur:.2f} min")
 
     if interactive:
         messages = []
@@ -128,12 +130,15 @@ def main(
             prompts = [line.strip() for line in f.readlines()]
         assert len(prompts) <= args.max_batch_size
         prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
+        now = datetime.now()
         completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
         completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             print("Prompt:", prompt)
             print("Completion:", completion)
             print()
+        dur = (datetime.now() - now).total_seconds() / 60.0
+        print(datetime.now(), f"DeepSeek Generate {len(completion_tokens)} tokens in {dur:.2f} min")
 
     if world_size > 1:
         dist.destroy_process_group()
