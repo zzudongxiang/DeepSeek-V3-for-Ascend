@@ -19,7 +19,7 @@ NNODES=${NNODES:="1"}
 
 # others var
 GPUS_PER_NODE=8
-MASTER_PORT=6000
+MASTER_PORT=8888
 WORLD_SIZE=$((GPUS_PER_NODE*NNODES))
 
 echo ----------------------------
@@ -29,18 +29,18 @@ echo NODE_RANK=${NODE_RANK}
 echo NNODES=${NNODES}
 echo ----------------------------
 
-DISTRIBUTED_ARGS="
-    --nproc_per_node $GPUS_PER_NODE \
-    --nnodes $NNODES                \
-    --node_rank $NODE_RANK          \
-    --master_addr $MASTER_ADDR      \
-    --master_port $MASTER_PORT
-"
+export PYTHONPATH=/home/ma-user/llm/mindformers/:$PYTHONPATH
+export HCCL_OP_EXPANSION_MODE=AIV
+export MS_ENABLE_LCCL=off
 
-# ../ckpt/r1-fp8-mp8
-# ../ckpt/v3-bf16-mp32
-torchrun $DISTRIBUTED_ARGS inference.py             \
-    --ckpt-path ../ckpt/v3-fp8-mp16/                \
-    --input-file scripts/inputs.txt                 \
-    --config configs/config_671B.json               \
-    | tee log/inference-multi-npu.log
+cd /home/ma-user/work/mindspore-dsv3/examples
+bash msrun_launcher.sh          \
+    "run_deepseekv3_predict.py" \
+    $WORLD_SIZE                 \
+    $WORLD_SIZE                 \
+    $MASTER_ADDR                \
+    $MASTER_PORT                \
+    $NODE_RANK                  \
+    output/msrun_log            \
+    False                       \
+    300

@@ -138,7 +138,7 @@ def main(
             print("Completion:", completion)
             print()
         dur = (datetime.now() - now).total_seconds() / 60.0
-        print(datetime.now(), f"DeepSeek Generate {len(completion_tokens)} tokens in {dur:.2f} min")
+        print(datetime.now(), f"DeepSeek Generate {len(completion_tokens[0])} tokens in {dur:.2f} min")
 
     if world_size > 1:
         dist.destroy_process_group()
