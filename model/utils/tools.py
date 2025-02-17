@@ -90,3 +90,55 @@ def weight_quant_int8_cpu(weight: torch.Tensor, block_size: int = 128) -> tuple[
     quantized = torch.round(weight / scale_expanded).to(torch.int8)
 
     return quantized, scale
+
+def weight_quant_fp8_cpu(weight: torch.Tensor, block_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantizes the given weight tensor into blocks of size block_size x block_size, computing scales for each block.
+    The quantized weight is stored in torch.float8_e4m3fn format, and the scale tensor is returned for dequantization.
+
+    Args:
+        weight (torch.Tensor): The input weight tensor of shape (M, N).
+        block_size (int, optional): The block size for quantization. Defaults to 128.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: The quantized weight tensor in torch.float8_e4m3fn format and the scale tensor.
+
+    Raises:
+        AssertionError: If block_size is not a positive integer.
+    """
+    assert block_size > 0, "block_size must be a positive integer."
+    
+    weight = weight.cpu().to(torch.float32)  # Ensure computation in float32
+    M, N = weight.shape
+
+    # Calculate scale dimensions with ceiling division
+    scale_m = (M + block_size - 1) // block_size
+    scale_n = (N + block_size - 1) // block_size
+    scale = torch.zeros((scale_m, scale_n), dtype=torch.float32)
+
+    # Get dynamic range of float8_e4m3fn format
+    max_float8 = torch.finfo(torch.float8_e4m3fn).max
+
+    # Calculate scale for each block
+    for i in range(scale_m):
+        row_start = i * block_size
+        row_end = min(row_start + block_size, M)
+        for j in range(scale_n):
+            col_start = j * block_size
+            col_end = min(col_start + block_size, N)
+            
+            block = weight[row_start:row_end, col_start:col_end]
+            max_val = torch.max(torch.abs(block))
+            
+            # Handle zero-initialized blocks
+            scale_val = max_val / max_float8 if max_val != 0 else 1.0
+            scale[i, j] = scale_val
+
+    # Expand scale tensor to match weight dimensions
+    scale_expanded = scale.repeat_interleave(block_size, dim=0).repeat_interleave(block_size, dim=1)
+    scale_expanded = scale_expanded[:M, :N]  # Trim to original dimensions
+
+    # Quantize and cast to float8_e4m3fn
+    quantized_weight = (weight / scale_expanded).to(torch.float8_e4m3fn)
+
+    return quantized_weight, scale
