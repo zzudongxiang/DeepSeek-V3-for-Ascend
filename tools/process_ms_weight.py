@@ -25,7 +25,7 @@ def copy_expert(hf_ckpt_path, save_path):
                         "w3": "up_proj",
                     }
                     for i in range(256):
-                        state_dict[f"model.layers.{layer_id}.mlp.experts.{i}.{w_map[w]}.weight"] = tensor[i, :, :]
+                        state_dict[f"model.layers.{layer_id}.mlp.experts.{i}.{w_map[w]}.weight"] = tensor[i, :, :].T.contiguous()
                     save_file(state_dict, os.path.join(save_path, os.path.basename(file_path)))
                 else:
                     os.system(f"cp {file_path} {os.path.join(save_path, os.path.basename(file_path))}")
