@@ -37,8 +37,8 @@ def copy_expert(hf_ckpt_path, save_path):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--ms-ckpt-path", type=str, default="/home/zhangdx/mnt/deepseek-v3/mindspore-dsv3")
-    parser.add_argument("--hf-ckpt-path", type=str, default="/home/zhangdx/mnt/deepseek-v3/mindspore-dsv3-hf")
+    parser.add_argument("--ms-ckpt-path", type=str, default="../mindspore-dsv3")
+    parser.add_argument("--hf-ckpt-path", type=str, default="../mindspore-dsv3-hf")
     args = parser.parse_args()
 
     # 复制专家，将ms中的专家拆分成多个专家对象

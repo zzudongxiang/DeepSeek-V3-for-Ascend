@@ -106,8 +106,8 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--hf-ckpt-path", type=str, default="/home/zhangdx/mnt/deepseek-v3/mindspore-dsv3-hf")
-    parser.add_argument("--save-path", type=str, default="/home/zhangdx/mnt/deepseek-v3/ckpt/v3-bf16-mp32-ms")
+    parser.add_argument("--hf-ckpt-path", type=str, default="../mindspore-dsv3-hf")
+    parser.add_argument("--save-path", type=str, default="../ckpt/v3-bf16-mp32-ms")
     parser.add_argument("--n-experts", type=int, default=256)
     parser.add_argument("--model-parallel", type=int, default=32)
     args = parser.parse_args()
