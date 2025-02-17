@@ -48,3 +48,45 @@ def weight_dequant_cpu(weight: torch.Tensor, scale: torch.Tensor, block_size: in
     dequantized_weight = dequantized_weight.to(torch.get_default_dtype())
 
     return dequantized_weight
+
+def weight_quant_int8_cpu(weight: torch.Tensor, block_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantizes the given weight tensor using block-wise scaling, handling cases where
+    `weight` is not a multiple of `block_size` by properly aligning scale dimensions.
+
+    Args:
+        weight (torch.Tensor): The float weight tensor of shape (M, N) to be quantized.
+        block_size (int, optional): The block size to use for quantization. Defaults to 128.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: 
+            - Quantized int8 weight tensor of same shape as input
+            - Scale tensor of shape (M // block_size, N // block_size)
+    
+    Raises:
+        AssertionError: If weight dimensions are smaller than block_size
+    """
+    weight = weight.cpu().float()
+    M, N = weight.shape
+    assert M >= block_size and N >= block_size, "Weight dimensions must be >= block_size"
+
+    # 计算分块后的scale矩阵维度
+    scale_m = (M + block_size - 1) // block_size
+    scale_n = (N + block_size - 1) // block_size
+
+    # 分块并计算每个块的绝对值最大值
+    blocks = weight.abs().unfold(0, block_size, block_size).unfold(1, block_size, block_size)
+    blocks = blocks.contiguous().view(scale_m, scale_n, -1)
+    max_val, _ = blocks.max(dim=-1)
+
+    # 计算scale并处理零值
+    scale = max_val / 127.0
+    scale = torch.where(max_val == 0, torch.ones_like(scale), scale)
+
+    # 扩展scale矩阵以匹配原始权重形状
+    scale_expanded = scale.repeat_interleave(block_size, 0).repeat_interleave(block_size, 1)[:M, :N]
+
+    # 执行量化并转换类型
+    quantized = torch.round(weight / scale_expanded).to(torch.int8)
+
+    return quantized, scale
