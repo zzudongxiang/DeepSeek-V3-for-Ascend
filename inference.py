@@ -72,7 +72,7 @@ def generate(
             output_tokens += len(toks)
         completion_tokens.append(toks)
     tpot = output_tokens / dur
-    print(f"Throughput: {tpot.total_seconds():.4f} tokens/s ({output_tokens} tokens for {dur} sec)")
+    print(f"Throughput: {tpot:.4f} tokens/s ({output_tokens} tokens for {dur} sec)")
     return completion_tokens
 
 
@@ -145,7 +145,12 @@ def main(
         assert len(prompts) <= args.max_batch_size
         prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
         now = datetime.now()
-        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+        from torch.profiler import profile, ProfilerActivity
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler("log"),
+        ) as prof:
+            completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
         completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             print("Prompt:", prompt)
@@ -167,7 +172,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--interactive", action="store_true")
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--max-new-tokens", type=int, default=10)
     parser.add_argument("--temperature", type=float, default=0)
     args = parser.parse_args()
     assert args.input_file or args.interactive
