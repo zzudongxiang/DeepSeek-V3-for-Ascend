@@ -1,8 +1,11 @@
 set -e
 
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
 OUT_PUT="log"
 rm -rf ${OUT_PUT} && mkdir -p ${OUT_PUT}
-msprof --application="bash scripts/single-gpu-inference.sh" \
+
+msprof --application="bash scripts/inference.sh" \
     --output=${OUT_PUT} \
     --ascendcl=on \
     --model-execution=on \
@@ -26,3 +29,6 @@ msprof --application="bash scripts/single-gpu-inference.sh" \
     --dvpp-freq=100 \
     --l2=on \
     --ai-core=on
+
+# tar -zcvf log.tar.gz log/xxx
+# msprof --export=on --output=log/xxx

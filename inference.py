@@ -145,12 +145,12 @@ def main(
         assert len(prompts) <= args.max_batch_size
         prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
         now = datetime.now()
-        from torch.profiler import profile, ProfilerActivity
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler("log"),
-        ) as prof:
-            completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+        # from torch.profiler import profile, ProfilerActivity
+        # with profile(
+        #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU],
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler("log"),
+        # ) as prof:
+        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
         completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             print("Prompt:", prompt)
