@@ -42,14 +42,13 @@ def generate(
     finished = torch.tensor([False] * len(prompt_tokens), device=default_device)
     prompt_mask = tokens != -1
     t0 = datetime.now()
-    output_tokens = 0
     ttft_flag = True
     for cur_pos in range(min(prompt_lens), total_len):
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
         if ttft_flag:
             ttft_flag = False
             ttft = datetime.now() - t0
-            print(f"TTFT: {ttft.total_seconds()} ({cur_pos} tokens)")
+            print(f"TTFT: {ttft.total_seconds():.4f} seconds ({cur_pos} tokens)")
             t0 = datetime.now()
         if temperature > 0:
             next_token = sample_cpu(logits, temperature)
@@ -59,18 +58,21 @@ def generate(
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
         prev_pos = cur_pos
-        output_tokens += len(prompt_lens)
         if finished.all():
-            dur = (datetime.now() - t0).total_seconds()
-            tpot = output_tokens / dur.total_seconds()
-            print(f"TPOT: {tpot.total_seconds()} ({output_tokens} tokens for {dur} sec)")
             break
+    output_tokens = 0
+    dur = (datetime.now() - t0).total_seconds()
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
         toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
         if eos_id in toks:
             toks = toks[:toks.index(eos_id)]
+            output_tokens += toks.index(eos_id)
+        else:
+            output_tokens += len(toks)
         completion_tokens.append(toks)
+    tpot = output_tokens / dur
+    print(f"Throughput: {tpot.total_seconds():.4f} tokens/s ({output_tokens} tokens for {dur} sec)")
     return completion_tokens
 
 
