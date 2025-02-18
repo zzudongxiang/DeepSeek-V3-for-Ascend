@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from kernel import act_quant, weight_dequant, fp8_gemm
+#from kernel import act_quant, weight_dequant, fp8_gemm
 
 
 world_size = 1
@@ -18,8 +18,8 @@ attn_impl: Literal["naive", "absorb"] = "absorb"
 
 @dataclass
 class ModelArgs:
-    max_batch_size: int = 8
-    max_seq_len: int = 4096 * 4
+    max_batch_size: int = 128
+    max_seq_len: int = 2048
     dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
     dim: int = 2048

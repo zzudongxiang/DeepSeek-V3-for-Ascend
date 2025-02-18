@@ -11,8 +11,8 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
-from model.utils.tools import sample
-from model.deepseek_offload_cpu import Transformer, ModelArgs
+from model.utils.tools import sample_cpu
+from model.deepseek_hf import Transformer, ModelArgs
 
 default_device = "cuda"
 
@@ -41,17 +41,29 @@ def generate(
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device=default_device)
     prompt_mask = tokens != -1
+    t0 = datetime.now()
+    output_tokens = 0
+    ttft_flag = True
     for cur_pos in range(min(prompt_lens), total_len):
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        if ttft_flag:
+            ttft_flag = False
+            ttft = datetime.now() - t0
+            print(f"TTFT: {ttft.total_seconds()} ({cur_pos} tokens)")
+            t0 = datetime.now()
         if temperature > 0:
-            next_token = sample(logits, temperature)
+            next_token = sample_cpu(logits, temperature)
         else:
             next_token = logits.argmax(dim=-1)
         next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
         prev_pos = cur_pos
+        output_tokens += len(prompt_lens)
         if finished.all():
+            dur = (datetime.now() - t0).total_seconds()
+            tpot = output_tokens / dur.total_seconds()
+            print(f"TPOT: {tpot.total_seconds()} ({output_tokens} tokens for {dur} sec)")
             break
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
@@ -138,7 +150,10 @@ def main(
             print("Completion:", completion)
             print()
         dur = (datetime.now() - now).total_seconds() / 60.0
-        print(datetime.now(), f"DeepSeek Generate {len(completion_tokens[0])} tokens in {dur:.2f} min")
+        tokens = 0
+        for item in completion_tokens:
+            tokens += len(item)
+        print(datetime.now(), f"DeepSeek Generate {tokens} tokens in {dur:.2f} min")
 
     if world_size > 1:
         dist.destroy_process_group()
@@ -150,8 +165,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--interactive", action="store_true")
-    parser.add_argument("--max-new-tokens", type=int, default=200)
-    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0)
     args = parser.parse_args()
     assert args.input_file or args.interactive
     main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
