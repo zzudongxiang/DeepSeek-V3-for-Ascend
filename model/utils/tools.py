@@ -169,3 +169,23 @@ def weight_quant_fp8_cpu(weight: torch.Tensor, block_size: int = 128) -> tuple[t
     quantized_weight = (weight / scale_expanded).to(torch.float8_e4m3fn)
 
     return quantized_weight, scale
+
+if __name__ == '__main__':
+    import torch
+    import torch_npu
+    import numpy as np
+    import matplotlib.pyplot as plt
+    logits = torch.rand(100000, dtype=torch.bfloat16).npu()
+    probs = torch.softmax(logits, dim=-1)
+    sample_cpu = torch.empty(list(probs.shape), dtype=probs.dtype, device="cpu").exponential_(1)
+    sample_npu = torch.empty(list(probs.shape), dtype=probs.dtype, device="npu").exponential_(1)
+
+    sample_cpu = sample_cpu.float().cpu().numpy()
+    plt.hist(sample_cpu, bins=100)
+    plt.savefig("1.png")
+    plt.close()
+    sample_npu = sample_npu.float().cpu().numpy()
+    sample_npu = np.where(np.isinf(sample_npu), -1, sample_npu)
+    plt.hist(sample_npu, bins=100)
+    plt.savefig("2.png")
+    print(sample_cpu, sample_npu)
