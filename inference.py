@@ -66,8 +66,9 @@ def generate(
     for i, toks in enumerate(tokens.tolist()):
         toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
         if eos_id in toks:
-            toks = toks[:toks.index(eos_id)]
-            output_tokens += toks.index(eos_id)
+            index = toks.index(eos_id)
+            toks = toks[:index]
+            output_tokens += index
         else:
             output_tokens += len(toks)
         completion_tokens.append(toks)
@@ -172,7 +173,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--interactive", action="store_true")
-    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0)
     args = parser.parse_args()
     assert args.input_file or args.interactive

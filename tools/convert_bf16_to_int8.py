@@ -80,14 +80,19 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         quant_flag = re.match(item, name, re.IGNORECASE)
                     if quant_flag:
                         assert ".scale" not in name
-                        weight_fp32 = new_param.float()
-                        max_vals_per_row = torch.max(torch.abs(weight_fp32), dim=1).values
+                        weight_fp32 = new_param.float().T # [7168, 2048]
+                        max_vals_per_row = torch.max(torch.abs(weight_fp32), dim=0).values
                         assert torch.all(max_vals_per_row > 0), "Some rows have zero max values"
-                        scales_per_row = (max_vals_per_row / 127.0).unsqueeze(1)
+
+                        scales_per_row = max_vals_per_row / 127.0 # [2048,]
                         quantized_weight = torch.clamp(torch.round(weight_fp32 / scales_per_row), min=-128, max=127)
-                        scales_per_row = scales_per_row.squeeze(1).to(torch.bfloat16).contiguous()
-                        state_dicts[i][name] = quantized_weight.T.to(torch.int8).contiguous() # [7168, 2048]
-                        state_dicts[i][name.replace(".weight", ".scale")] = scales_per_row # [2048,]
+                        state_dicts[i][name] = quantized_weight.to(torch.int8).contiguous()
+                        state_dicts[i][name.replace(".weight", ".scale")] = scales_per_row.to(torch.bfloat16).contiguous()
+
+                        # if ".w1." in name:
+                        #     w = (state_dicts[i][name].to(torch.bfloat16) * state_dicts[i][name.replace(".weight", ".scale")]).T
+                        #     diff = w - new_param
+                        #     print(f"[{name}] min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {(diff.abs().sum() / new_param.abs().sum()).item() * 100:.2f}%")
                     else:
                         state_dicts[i][name] = new_param
 

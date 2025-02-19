@@ -115,16 +115,13 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        # 由于使用torch_npu的MatMul算子，需要对Weight转置，所以提前转置Weight矩阵
         if dtype is None:
+            # 由于使用torch_npu的MatMul算子，需要对Weight转置，所以提前转置Weight矩阵
             self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=dtype or Linear.dtype), requires_grad=False)
         else:
+            # embed层不需要量化处理，所以不需要转置Weight
             self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
         if self.weight.element_size() == 1:
-            # scale_out_features = (out_features + block_size - 1) // block_size
-            # scale_in_features = (in_features + block_size - 1) // block_size
-            # self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
-
             # 暂时不支持Block的量化操作，需要改变Scale的维度
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, dtype=torch.bfloat16))
         else:
@@ -348,7 +345,7 @@ class Gate(nn.Module):
 class Expert(nn.Module):
     def __init__(self, dim: int, inter_dim: int):
         super().__init__()
-        self.w1 = Linear(dim, inter_dim) # [7168, 2048] [2048,]
+        self.w1 = Linear(dim, inter_dim) # int8: [7168, 2048] / [2048]
         self.w2 = Linear(inter_dim, dim)
         self.w3 = Linear(dim, inter_dim)
 
