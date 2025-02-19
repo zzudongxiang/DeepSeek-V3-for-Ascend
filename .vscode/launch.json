@@ -17,9 +17,8 @@
             },
             "args": [
                 "--ckpt-path", "ckpt",
-                "--config", "configs/config_16B.json",
-                "--input-file", "scripts/inputs.txt",
-                "--use-random-weights",
+                "--config", "configs/config_671B_test.json",
+                "--input-file", "scripts/inputs.txt"
             ]
         },
         {
@@ -41,9 +40,8 @@
                 "--master_port", "6001",
                 "inference.py",
                 "--ckpt-path", "ckpt",
-                "--config", "configs/config_16B.json",
-                "--input-file", "scripts/inputs.txt",
-                "--use-random-weights",
+                "--config", "configs/config_671B_test.json",
+                "--input-file", "scripts/inputs.txt"
             ]
         },
         {
