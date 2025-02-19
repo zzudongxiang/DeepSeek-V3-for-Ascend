@@ -5,8 +5,9 @@ from glob import glob
 from tqdm import tqdm, trange
 
 import torch
+import torch_npu
 from safetensors.torch import safe_open, save_file
-
+import torch.nn.functional as F
 
 mapping = {
     "embed_tokens": ("embed", 0),
@@ -89,10 +90,19 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         state_dicts[i][name] = quantized_weight.to(torch.int8).contiguous()
                         state_dicts[i][name.replace(".weight", ".scale")] = scales_per_row.to(torch.bfloat16).contiguous()
 
-                        # if ".w1." in name:
+                        # if ".w1." in name: # 为了方便对比数据，选定Expert的w1权重作为参考 (量化前后的误差大约在1%左右)
                         #     w = (state_dicts[i][name].to(torch.bfloat16) * state_dicts[i][name.replace(".weight", ".scale")]).T
                         #     diff = w - new_param
-                        #     print(f"[{name}] min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {(diff.abs().sum() / new_param.abs().sum()).item() * 100:.2f}%")
+                        #     diff_error = diff.abs().sum() / new_param.abs().sum()
+                        #     print(f"[{name}] min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {diff_error.item() * 100:.2f}%")
+
+                        #     x = torch.randn(1024, w.shape[1], dtype=torch.bfloat16).to("npu")
+                        #     y1 = F.linear(x, new_param.to("npu"))
+                        #     y2 = F.linear(x, w.to("npu"))
+                        #     diff = y1 - y2
+                        #     diff_error = diff.abs().sum() / y1.abs().sum()
+                        #     print(f"[{name}] min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {diff_error.item() * 100:.2f}%")
+
                     else:
                         state_dicts[i][name] = new_param
 
