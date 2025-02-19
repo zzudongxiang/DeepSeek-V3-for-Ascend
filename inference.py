@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
 from model.utils.tools import sample_cpu
-from model.deepseek_hf import Transformer, ModelArgs
+from model.deepseek_int8 import Transformer, ModelArgs
 
 default_device = "cuda"
 
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--interactive", action="store_true")
-    parser.add_argument("--max-new-tokens", type=int, default=10)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0)
     args = parser.parse_args()
     assert args.input_file or args.interactive

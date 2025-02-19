@@ -40,7 +40,7 @@ DISTRIBUTED_ARGS="
 # ../ckpt/r1-fp8-mp8
 # ../ckpt/v3-bf16-mp32
 torchrun $DISTRIBUTED_ARGS inference.py             \
-    --ckpt-path ../ckpt/v3-bf16-mp32/               \
-    --input-file scripts/inputs_128.txt             \
+    --ckpt-path ../ckpt/v3-int8-mp16/               \
+    --input-file scripts/inputs.txt                 \
     --config configs/config_671B.json               \
     | tee log/inference.log

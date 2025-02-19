@@ -67,6 +67,7 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         r".*layers\.\d+\.attn\.wkv_b.*",
                         r".*layers\.\d+\.attn\.wq_a.*",
                         r".*layers\.\d+\.attn\.wq_b.*",
+                        r".*layers\.\d+\.attn\.wq.*",
                         r".*layers\.\d+\.attn\.wo.*",
                         r".*layers\.\d+\.ffn\.w\d+.*",
                         r".*layers\.\d+\.ffn\.experts\.\d+\.w\d+.*",
@@ -78,21 +79,15 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                             break
                         quant_flag = re.match(item, name, re.IGNORECASE)
                     if quant_flag:
-                        block_size = 128
                         assert ".scale" not in name
                         weight_fp32 = new_param.float()
-                        in_features = weight_fp32.shape[0]
-                        out_features = weight_fp32.shape[1]
-                        scale_in_features = (in_features + block_size - 1) // block_size
-                        scale_out_features = (out_features + block_size - 1) // block_size
-                        max_val = torch.max(torch.abs(weight_fp32))
-                        assert max_val > 0
-                        scale = (max_val / 127.0)
-                        scale_mat = (max_val / 127.0) * torch.ones(scale_in_features, scale_out_features, dtype=torch.float32)
-                        quantized_weight = torch.clamp(torch.round(weight_fp32 / scale), min=-128, max=127)
-                        state_dicts[i][name] = quantized_weight.to(torch.int8)
-                        # state_dicts[i][f"{name}.scale"] = scale_mat
-                        state_dicts[i][name.replace(".weight", ".scale")] = scale_mat
+                        max_vals_per_row = torch.max(torch.abs(weight_fp32), dim=1).values
+                        assert torch.all(max_vals_per_row > 0), "Some rows have zero max values"
+                        scales_per_row = (max_vals_per_row / 127.0).unsqueeze(1)
+                        quantized_weight = torch.clamp(torch.round(weight_fp32 / scales_per_row), min=-128, max=127)
+                        scales_per_row = scales_per_row.squeeze(1)
+                        state_dicts[i][name] = quantized_weight.T.to(torch.int8).contiguous() # [7168, 2048]
+                        state_dicts[i][name.replace(".weight", ".scale")] = scales_per_row # [2048,]
                     else:
                         state_dicts[i][name] = new_param
 
@@ -108,8 +103,8 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--hf-ckpt-path", type=str, default="../weights-from-hf/")
-    parser.add_argument("--save-path", type=str, default="../ckpt-ep256-mp16-int8")
+    parser.add_argument("--hf-ckpt-path", type=str, default="../weights-from-hf/DeepSeek-V3-BF16")
+    parser.add_argument("--save-path", type=str, default="../ckpt/v3-int8-mp16.T")
     parser.add_argument("--n-experts", type=int, default="256")
     parser.add_argument("--model-parallel", type=int, default=16)
     args = parser.parse_args()
