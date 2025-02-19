@@ -85,7 +85,7 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         assert torch.all(max_vals_per_row > 0), "Some rows have zero max values"
                         scales_per_row = (max_vals_per_row / 127.0).unsqueeze(1)
                         quantized_weight = torch.clamp(torch.round(weight_fp32 / scales_per_row), min=-128, max=127)
-                        scales_per_row = scales_per_row.squeeze(1)
+                        scales_per_row = scales_per_row.squeeze(1).to(torch.bfloat16).contiguous()
                         state_dicts[i][name] = quantized_weight.T.to(torch.int8).contiguous() # [7168, 2048]
                         state_dicts[i][name.replace(".weight", ".scale")] = scales_per_row # [2048,]
                     else:

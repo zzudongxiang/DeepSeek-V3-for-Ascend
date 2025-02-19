@@ -19,8 +19,8 @@ attn_impl: Literal["naive", "absorb"] = "absorb"
 
 @dataclass
 class ModelArgs:
-    max_batch_size: int = 32
-    max_seq_len: int = 2048
+    max_batch_size: int = 128
+    max_seq_len: int = 1024
     dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
     dim: int = 2048
@@ -82,11 +82,22 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC2/apiref/apilist/ptaoplist_000465.html
         # return torch_npu.npu_weight_quant_batchmatmul(x, weight, weight.scale.to(torch.bfloat16), bias=bias)
 
+        # 方案1: 手动对x做量化然后再进行矩阵乘法（影响性能）
         # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC2/apiref/apilist/ptaoplist_000464.html
-        max_val = torch.max(torch.abs(x))
-        scale = (max_val / 127.0) if max_val > 0 else 1
-        x = torch.clamp(torch.round(x / scale), min=-128, max=127).to(torch.int8)
-        return torch_npu.npu_quant_matmul(x, weight, weight.scale, bias=bias).to(torch.bfloat16) * scale
+        # max_val = torch.max(torch.abs(x))
+        # scale = (max_val / 127.0) if max_val > 0 else 1
+        # x = torch.clamp(torch.round(x / scale), min=-128, max=127).to(torch.int8)
+        # return torch_npu.npu_quant_matmul(x, weight, weight.scale, bias=bias).to(torch.bfloat16) * scale
+
+        # 方案2: 使用算子自带的量化手段对x进行量化（性能手动对x量化的方案好）
+        # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC2/apiref/apilist/ptaoplist_000464.html
+        if len(x.shape) > 2:
+            batch_size, seq_len, hidden_dim = x.shape
+            x_reshaped = x.view(-1, hidden_dim)
+            y = torch_npu.npu_weight_quant_batchmatmul(x_reshaped, weight, weight.scale, bias=bias)
+            return y.view(batch_size, seq_len, -1)
+        else:
+            return torch_npu.npu_weight_quant_batchmatmul(x, weight, weight.scale, bias=bias)
     else:
         raise Exception("unsupport gemm impl")
     # else:
@@ -115,7 +126,7 @@ class Linear(nn.Module):
             # self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
 
             # 暂时不支持Block的量化操作，需要改变Scale的维度
-            self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, dtype=torch.float32))
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, dtype=torch.bfloat16))
         else:
             self.register_parameter("scale", None)
         if bias:
