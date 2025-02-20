@@ -125,14 +125,14 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                 gc.collect()
         gc.collect()
 
-    # os.makedirs(save_path, exist_ok=True)
+    os.makedirs(save_path, exist_ok=True)
 
-    # for i in trange(mp):
-    #     save_file(state_dicts[i], os.path.join(save_path, f"model{i}-mp{mp}.safetensors"))
+    for i in trange(mp):
+        save_file(state_dicts[i], os.path.join(save_path, f"model{i}-mp{mp}.safetensors"))
 
-    # for file_path in glob(os.path.join(hf_ckpt_path, "*token*")):
-    #     new_file_path = os.path.join(save_path, os.path.basename(file_path))
-    #     shutil.copyfile(file_path, new_file_path)
+    for file_path in glob(os.path.join(hf_ckpt_path, "*token*")):
+        new_file_path = os.path.join(save_path, os.path.basename(file_path))
+        shutil.copyfile(file_path, new_file_path)
 
 
 if __name__ == "__main__":
