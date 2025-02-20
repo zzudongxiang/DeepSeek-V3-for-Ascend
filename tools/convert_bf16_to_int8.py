@@ -4,10 +4,9 @@ from argparse import ArgumentParser
 from glob import glob
 from tqdm import tqdm, trange
 
+import gc
 import torch
-import torch_npu
 from safetensors.torch import safe_open, save_file
-import torch.nn.functional as F
 
 mapping = {
     "embed_tokens": ("embed", 0),
@@ -35,6 +34,12 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
     torch.set_num_threads(96)
     n_local_experts = n_experts // mp
     state_dicts = [{} for _ in range(mp)]
+
+    # 创建tensor映射的磁盘文件夹
+    mmap_dir = "log/mmap_tmp"
+    if os.path.exists(mmap_dir):
+        os.system(f"rm -rf {mmap_dir}")
+    os.makedirs(f"{mmap_dir}", exist_ok=True)
 
     for file_path in tqdm(glob(os.path.join(hf_ckpt_path, "*.safetensors"))):
         with safe_open(file_path, framework="pt", device="cpu") as f:
@@ -87,10 +92,20 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
 
                         scales_per_row = max_vals_per_row / 127.0 # [2048,]
                         quantized_weight = torch.clamp(torch.round(weight_fp32 / scales_per_row), min=-128, max=127)
-                        state_dicts[i][name] = quantized_weight.to(torch.int8).contiguous()
-                        state_dicts[i][name.replace(".weight", ".scale")] = scales_per_row.to(torch.bfloat16).contiguous()
+                        torch.save(quantized_weight.to(torch.int8).contiguous(), f"{mmap_dir}/{name}.pt")
+                        torch.save(scales_per_row.to(torch.bfloat16).contiguous(), f"{mmap_dir}/{name}.scale.pt")
+                        state_dicts[i][name] = torch.load(f"{mmap_dir}/{name}.pt", map_location="cpu")
+                        state_dicts[i][name.replace(".weight", ".scale")] = torch.load(f"{mmap_dir}/{name}.scale.pt", map_location="cpu")
+                        del quantized_weight
+                        del scales_per_row
+                        del weight_fp32
+                        del new_param
+                        gc.collect()
 
                         # if ".w1." in name: # 为了方便对比数据，选定Expert的w1权重作为参考 (量化前后的误差大约在1%左右)
+                        #     import torch_npu
+                        #     import torch.nn.functional as F
+
                         #     w = (state_dicts[i][name].to(torch.bfloat16) * state_dicts[i][name.replace(".weight", ".scale")]).T
                         #     diff = w - new_param
                         #     diff_error = diff.abs().sum() / new_param.abs().sum()
@@ -105,6 +120,9 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
 
                     else:
                         state_dicts[i][name] = new_param
+                del param
+                gc.collect()
+        gc.collect()
 
     os.makedirs(save_path, exist_ok=True)
 
@@ -119,7 +137,7 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--hf-ckpt-path", type=str, default="../weights-from-hf/DeepSeek-V3-BF16")
-    parser.add_argument("--save-path", type=str, default="../ckpt/v3-int8-mp16.T")
+    parser.add_argument("--save-path", type=str, default="../ckpt/v3-int8-mp16")
     parser.add_argument("--n-experts", type=int, default="256")
     parser.add_argument("--model-parallel", type=int, default=16)
     args = parser.parse_args()
