@@ -96,11 +96,6 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         torch.save(scales_per_row.to(torch.bfloat16).contiguous(), f"{mmap_dir}/{name}.scale.pt")
                         state_dicts[i][name] = torch.load(f"{mmap_dir}/{name}.pt", map_location="cpu")
                         state_dicts[i][name.replace(".weight", ".scale")] = torch.load(f"{mmap_dir}/{name}.scale.pt", map_location="cpu")
-                        del quantized_weight
-                        del scales_per_row
-                        del weight_fp32
-                        del new_param
-                        gc.collect()
 
                         # if ".w1." in name: # 为了方便对比数据，选定Expert的w1权重作为参考 (量化前后的误差大约在1%左右)
                         #     import torch_npu
@@ -109,29 +104,35 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         #     w = (state_dicts[i][name].to(torch.bfloat16) * state_dicts[i][name.replace(".weight", ".scale")]).T
                         #     diff = w - new_param
                         #     diff_error = diff.abs().sum() / new_param.abs().sum()
-                        #     print(f"[{name}] min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {diff_error.item() * 100:.2f}%")
+                        #     print(f"[{name}] w >> min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {diff_error.item() * 100:.2f}%")
 
-                        #     x = torch.randn(1024, w.shape[1], dtype=torch.bfloat16).to("npu")
+                        #     x = torch.rand(1024, w.shape[1], dtype=torch.bfloat16).to("npu")
                         #     y1 = F.linear(x, new_param.to("npu"))
                         #     y2 = F.linear(x, w.to("npu"))
                         #     diff = y1 - y2
                         #     diff_error = diff.abs().sum() / y1.abs().sum()
-                        #     print(f"[{name}] min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {diff_error.item() * 100:.2f}%")
+                        #     print(f"[{name}] y >> min: {diff.min().item():.8f}, max: {diff.max().item():.8f}, mean: {diff.mean().item():.8f}, error: {diff_error.item() * 100:.2f}%")
+                        #     print("-" * 50)
 
+                        del quantized_weight
+                        del scales_per_row
+                        del weight_fp32
+                        del new_param
+                        gc.collect()
                     else:
                         state_dicts[i][name] = new_param
                 del param
                 gc.collect()
         gc.collect()
 
-    os.makedirs(save_path, exist_ok=True)
+    # os.makedirs(save_path, exist_ok=True)
 
-    for i in trange(mp):
-        save_file(state_dicts[i], os.path.join(save_path, f"model{i}-mp{mp}.safetensors"))
+    # for i in trange(mp):
+    #     save_file(state_dicts[i], os.path.join(save_path, f"model{i}-mp{mp}.safetensors"))
 
-    for file_path in glob(os.path.join(hf_ckpt_path, "*token*")):
-        new_file_path = os.path.join(save_path, os.path.basename(file_path))
-        shutil.copyfile(file_path, new_file_path)
+    # for file_path in glob(os.path.join(hf_ckpt_path, "*token*")):
+    #     new_file_path = os.path.join(save_path, os.path.basename(file_path))
+    #     shutil.copyfile(file_path, new_file_path)
 
 
 if __name__ == "__main__":
