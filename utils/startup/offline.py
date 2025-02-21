@@ -10,7 +10,5 @@ def run(model, tokenizer, file_path):
     completion_tokens = batch_generate(model, prompt_tokens, tokenizer.eos_token_id)
     completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
     for prompt, completion in zip(prompts, completions):
-        log_rank0("Prompt >>>")
-        print(prompt)
-        log_rank0("Completion >>>")
-        print(completion)
+        log_rank0(f"Prompt >>>\n{prompt}")
+        log_rank0(f"Completion >>>\n{completion}")

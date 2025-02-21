@@ -2,39 +2,16 @@ import torch
 import threading
 from typing import List
 from datetime import datetime
+from utils.logger import log_rank0
 from utils.sample import sample_cpu as sample
-from utils.logger import log_rank0, format_time
+from utils.progress import start_progress, stop_progress
 
 generate_progress = 0
-
-def periodic_print(stop_event):
-    t0 = datetime.now()
-    start_time = t0
-    while not stop_event.is_set():
-        current_time = datetime.now()
-        elapsed = (current_time - start_time).total_seconds()
-        if (current_time - t0).total_seconds() > 5:
-            progress = generate_progress * 100
-            if generate_progress > 0:
-                eta = (elapsed / progress) * (100 - progress)
-                log_rank0(f"Generate Progress: {progress:.2f}% | "
-                         f"Elapsed: {format_time(elapsed)} | "
-                         f"ETA: {format_time(eta)}")
-            else:
-                log_rank0(f"Generate Progress: {progress:.2f}% | "
-                         f"Elapsed: {format_time(elapsed)}")
-            t0 = current_time
-        stop_event.wait(1)
-    total_time = (datetime.now() - start_time).total_seconds()
-    log_rank0(f"Generate Progress: 100% | Total time: {format_time(total_time)}")
 
 @torch.inference_mode()
 def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]]:
     global generate_progress
-    stop_event = threading.Event()
-    thread = threading.Thread(target=periodic_print, args=(stop_event,))
-    thread.daemon = True
-    thread.start()
+    thread_tokens = start_progress(lambda: generate_progress, description="Generate Progress")
 
     max_new_tokens = 2 if warmup else model.args.max_new_tokens
     prompt_lens = [len(t) for t in prompt_tokens]
@@ -78,8 +55,7 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
             output_tokens += len(toks)
         completion_tokens.append(toks)
     tpot = output_tokens / dur
-    stop_event.set()
-    thread.join()
+    stop_progress(thread_tokens)
     log_rank0(f"TTFT: {ttft.total_seconds():.4f} seconds ({min(prompt_lens)} tokens)")
     log_rank0(f"Throughput: {tpot:.4f} tokens/s ({output_tokens} tokens for {dur:.4f} seconds)")
     return completion_tokens
