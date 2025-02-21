@@ -3,6 +3,7 @@
 import os
 import re
 import gc
+import sys
 import torch
 import shutil
 from glob import glob
@@ -15,6 +16,7 @@ state_dicts = []
 quant_type = None
 model_parallel = 0
 mmap_dir = "log/mmap_tmp"
+sys.path.append(os.getcwd())
 
 mapping = {
     "embed_tokens": ("embed", 0),
@@ -50,13 +52,6 @@ quant_list = [
 ]
 
 def quant_func(name, weight):
-    if "int8" in quant_type:
-        from utils.quantization.int8 import int8_quant as quant_weight
-    elif "int4" in quant_type:
-        from utils.quantization.int4 import int4_quant as quant_weight
-    else:
-        raise NotImplementedError(f"quant type {quant_type} not supported")
-
     quant_flag = False
     for item in quant_list:
         if quant_flag:
@@ -66,7 +61,17 @@ def quant_func(name, weight):
         assert ".scale" not in name
         quantized_weight_path = f"{mmap_dir}/{name}.pt"
         weight_scale_path = f"{mmap_dir}/{name}.scale.pt"
-        quantized_weight, weight_scale = quant_weight(weight.T)
+        if "int8" in quant_type:
+            from utils.quantization.int8 import int8_quant
+            quantized_weight, weight_scale = int8_quant(weight.T)
+        elif "int4" in quant_type:
+            import torch_npu
+            from utils.quantization.int4 import int4_quant
+            quantized_weight, weight_scale = int4_quant(weight.T.npu())
+            quantized_weight = quantized_weight.cpu()
+            weight_scale = weight_scale.cpu()
+        else:
+            raise NotImplementedError(f"quant type {quant_type} not supported")
         quantized_weight = quantized_weight.contiguous()
         weight_scale = weight_scale.contiguous()
         torch.save(weight_scale, weight_scale_path)

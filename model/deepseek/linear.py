@@ -22,6 +22,15 @@ def set_linear_args(local_gemm_impl: str, local_fp8_quant_block_size: int):
     gemm_impl = local_gemm_impl
     fp8_quant_block_size = local_fp8_quant_block_size
 
+def npu_weight_quant_batchmatmul(x, weight, scale, bias=None):
+    if len(x.shape) > 2:
+        batch_size, seq_len, hidden_dim = x.shape
+        x_reshaped = x.view(-1, hidden_dim)
+        y = torch_npu.npu_weight_quant_batchmatmul(x_reshaped, weight, scale, bias=bias)
+        return y.view(batch_size, seq_len, -1)
+    else:
+        return torch_npu.npu_weight_quant_batchmatmul(x, weight, scale, bias=bias)
+
 def fp8_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     if gemm_impl == "bf16":
         weight = fp8_dequant(weight, weight.scale, fp8_quant_block_size)
@@ -29,30 +38,21 @@ def fp8_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tenso
     else:
         raise NotImplementedError(f"Unsupported gemm_impl: {gemm_impl} for torch.float8_e4m3fn")
 
-def int8_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def quant_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     if gemm_impl == "bf16":
-        weight = int8_dequant(weight, weight.scale).T
+        if weight.dtype == torch.float8_e4m3fn:
+            weight = fp8_dequant(weight, weight.scale, fp8_quant_block_size)
+        elif weight.dtype == torch.int8:
+            weight = int8_dequant(weight, weight.scale).T
+        elif weight.dtype == torch.int32:
+            weight = int4_dequant(weight, weight.scale).T
+        else:
+            raise NotImplementedError(f"Unsupported dtype: {weight.dtype} for bf16 gemm_impl")
         return F.linear(x, weight, bias)
     elif gemm_impl == "naive":
-        if len(x.shape) > 2:
-            batch_size, seq_len, hidden_dim = x.shape
-            x_reshaped = x.view(-1, hidden_dim)
-            y = torch_npu.npu_weight_quant_batchmatmul(x_reshaped, weight, weight.scale, bias=bias)
-            return y.view(batch_size, seq_len, -1)
-        else:
-            return torch_npu.npu_weight_quant_batchmatmul(x, weight, weight.scale, bias=bias)
+        return npu_weight_quant_batchmatmul(x, weight, weight.scale, bias)
     else:
         raise NotImplementedError(f"Unsupported gemm_impl: {gemm_impl} for torch.int8")
-    
-def int4_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    if gemm_impl == "bf16":
-        weight = int4_dequant(weight, weight.scale).T
-        return F.linear(x, weight, bias)
-    elif gemm_impl == "naive":
-        # TODO
-        pass
-    else:
-        raise NotImplementedError(f"Unsupported gemm_impl: {gemm_impl} for torch.int4")
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     if (x.is_cpu or weight.is_cpu) and not cpu_gemm_support:
@@ -64,14 +64,5 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
         else:
             weight = weight.to(default_device)
         bias = bias.to(default_device) if bias is not None else None
-    if weight.dtype == torch.bfloat16:
-        y = F.linear(x, weight, bias)
-    elif weight.dtype == torch.float8_e4m3fn:
-        y = fp8_linear(x, weight, bias)
-    elif weight.dtype == torch.int8:
-        y = int8_linear(x, weight, bias)
-    elif weight.dtype == torch.int32:
-        y = int4_linear(x, weight, bias)
-    else:
-        raise NotImplementedError(f"Unsupported dtype: {weight.dtype} for linear")
+    y = F.linear(x, weight, bias) if weight.dtype == torch.bfloat16 else quant_linear(x, weight, bias)
     return y.to(default_device)

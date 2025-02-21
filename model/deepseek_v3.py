@@ -51,12 +51,18 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        if dtype is None and Linear.dtype == torch.int8:
+        if dtype is None and Linear.dtype != torch.bfloat16:
             # 由于使用torch_npu的MatMul算子，需要对Weight转置，所以提前转置Weight矩阵
-            self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=dtype or Linear.dtype), requires_grad=False)
+            if Linear.dtype == torch.int8:
+                self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=Linear.dtype), requires_grad=False)
+            elif Linear.dtype == torch.int32:
+                assert out_features % 8 == 0
+                self.weight = nn.Parameter(torch.empty(in_features, out_features // 8, dtype=Linear.dtype), requires_grad=False)
+            else:
+                raise ValueError(f"Unsupported dtype: {Linear.dtype}")
         else:
             # embed层不需要量化处理，所以不需要转置Weight
-            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
+            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype), requires_grad=False)
         if self.weight.dtype != torch.bfloat16:
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, dtype=torch.bfloat16))
         else:
