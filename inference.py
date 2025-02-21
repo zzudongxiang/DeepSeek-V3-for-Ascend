@@ -20,6 +20,7 @@ try:
     default_device = "npu"
 except:
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[{datetime.now()}] torch_npu not found, use torch instead")
 
 
 def load_model_weight(model, ckpt_path):
@@ -52,16 +53,17 @@ def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup
         args = ModelArgs(**json.load(f))
     args_index = 0
     while args_index < len(model_args):
-        key = model_args[args_index].replace("--", "")
+        key = model_args[args_index].replace("--", "").replace("-", "_")
         if hasattr(args, key):
             value = model_args[args_index + 1]
             setattr(args, key, value)
         else:
             log_rank0(f"Unknow args: {key}")
         args_index += 2
+    log_rank0(args)
 
     with torch.device(default_device):
-        model = module.Transformer(args)
+        model = module.Transformer(args, default_device)
         # model = torch.compile(model)
 
     # 模型预热
@@ -74,12 +76,17 @@ def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup
     # 加载模型权重
     if not args.use_random_weights:
         load_model_weight(model, ckpt_path)
-    log_rank0(args)
 
     # 按照启动类型启动对应的实例
     if startup_type == "online":
-        from utils.startup.online import run
-        run(model, tokenizer)
+        api_port = 5000
+        service_port = 5001
+        from utils.startup.online import run_master, run_slaver
+        dist.barrier()
+        if rank == 0:
+            run_master(model, tokenizer, api_port, service_port)
+        else:
+            run_slaver(model, tokenizer, service_port)
     elif startup_type == "interactive":
         from utils.startup.interactive import run
         run(model, tokenizer)

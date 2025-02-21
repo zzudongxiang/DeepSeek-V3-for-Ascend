@@ -17,17 +17,19 @@ def print_progress(stop_event, read_progress_func, description="", interval=10):
             progress = read_progress_func()
             progress = progress if progress < 1 else 1
             if progress > 0:
-                log_rank0(f"{description}: {(progress * 100):.2f}% | "
+                log_rank0(f"{description}: {(progress * 100):05.02f}% | "
                             f"Elapsed: {format_time(elapsed)} | "
                             f"ETA: {format_time((elapsed / progress) * (1 - progress))}")
             else:
-                log_rank0(f"{description}: 0% | "
-                            f"Total time: {format_time(elapsed)}")
+                log_rank0(f"{description}: --.--% | "
+                            f"Elapsed: {format_time(elapsed)}")
         stop_event.wait(1)
     total_time = (datetime.now() - t0).total_seconds()
-    log_rank0(f"{description}: 100% | Total time: {format_time(total_time)}")
+    log_rank0(f"{description}: 100.0% | Total time: {format_time(total_time)}")
 
-def start_progress(read_progress_func, description="", interval=10):
+def start_progress(read_progress_func, reset_progress_value=None, description="", interval=10):
+    if reset_progress_value is not None:
+        reset_progress_value()
     stop_event = threading.Event()
     thread = threading.Thread(target=print_progress, args=(stop_event, read_progress_func, description, interval,))
     thread.daemon = True

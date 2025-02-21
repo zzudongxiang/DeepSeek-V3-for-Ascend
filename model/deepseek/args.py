@@ -17,11 +17,19 @@ def auto_convert_types(func):
                     return func(obj, name, value)
                 else:
                     raise ValueError(f"Value '{value}' must be one of {literal_values}")
-            try:
-                converted_value = target_type(value)
-                return func(obj, name, converted_value)
-            except (ValueError, TypeError):
-                raise TypeError(f"Cannot convert {value} to {target_type}")
+            elif target_type is bool and isinstance(value, str):
+                if value.lower() == 'true':
+                    return func(obj, name, True)
+                elif value.lower() == 'false':
+                    return func(obj, name, False)
+                else:
+                    raise ValueError(f"Cannot convert '{value}' to bool")
+            else:
+                try:
+                    converted_value = target_type(value)
+                    return func(obj, name, converted_value)
+                except (ValueError, TypeError):
+                    raise TypeError(f"Cannot convert {value} to {target_type}")
         return func(obj, name, value)
     return wrapper
 
@@ -73,8 +81,8 @@ class ModelArgs:
         super().__setattr__(name, value)
 
     def __str__(self):
-        split_line = "-" * 50 + "\n"
-        print_str = "\n" + split_line
+        split_line = "-" * 50
+        print_str = "ModelArgs\n" + split_line + "\n"
         for k,v in self.__dict__.items():
             print_str += f"{k:<25} = {v}\n"
         print_str += split_line

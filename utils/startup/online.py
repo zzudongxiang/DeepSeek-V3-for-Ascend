@@ -1,12 +1,13 @@
+import os
 import time
 import flask
 import random
 import threading
 from queue import Queue
 from datetime import datetime
-from utils.logger import log_rank0
 from concurrent.futures import Future
 from utils.generate import batch_generate
+from utils.startup.tcpip import Server, Client
 
 app = flask.Flask(__name__)
 
@@ -15,7 +16,6 @@ max_reponse_delay = 1.0
 
 request_queue = Queue()
 condition = threading.Condition()
-model, tokenizer = None, None
 
 def generate_response(prompt, completion):
     return {
@@ -38,7 +38,13 @@ def generate_response(prompt, completion):
         }]
     }
 
-def batch_processor():
+def batch_generate_response(model, tokenizer, prompts):
+    prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
+    completions = tokenizer.batch_decode(batch_generate(model, prompt_tokens, tokenizer.eos_token_id), skip_special_tokens=True)
+    responses = [generate_response(prompt, completion) for prompt, completion in zip(prompts, completions)]
+    return responses
+
+def master_worker(model, tokenizer, server):
     batch = []
     timeout = max_reponse_delay
     t0 = datetime.now()
@@ -55,13 +61,12 @@ def batch_processor():
                 batch.append(request_queue.get())
         if batch and (datetime.now() - t0).total_seconds() >= max_reponse_delay:
             try:
-                sub_batches = [batch[i:i + model.args.max_batch_size] for i in range(0, len(batch), model.args.max_batch_size)]
+                sub_batches = [batch[i: i + model.args.max_batch_size] for i in range(0, len(batch), model.args.max_batch_size)]
                 for sub_batch in sub_batches:
-                    # 提取prompts并生成响应
+                    # 广播给其他节点
                     prompts = [item['prompt'] for item in sub_batch]
-                    prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-                    completions = tokenizer.batch_decode(batch_generate(model, prompt_tokens, tokenizer.eos_token_id), skip_special_tokens=True)
-                    responses = [generate_response(prompt, completion) for prompt, completion in zip(prompts, completions)]
+                    server.broadcast(prompts)
+                    responses = batch_generate_response(model, tokenizer, prompts)
                     # 将响应分配给对应的future
                     for item, response in zip(sub_batch, responses):
                         item['future'].set_result(response)
@@ -71,39 +76,38 @@ def batch_processor():
             finally:
                 batch.clear()
 
-# 启动后台批处理线程
-processor_thread = threading.Thread(target=batch_processor, daemon=True)
-processor_thread.start()
-
 @app.route('/chat', methods=['POST'])
 def generate_text():
     data = flask.request.json
     prompt = data.get('prompt')
     if not prompt:
         return flask.jsonify({'error': 'Prompt is required'}), 400
-
-    # 创建Future并加入队列
     future = Future()
     request_queue.put({'prompt': prompt, 'future': future})
-    
-    # 通知批处理线程
     with condition:
         condition.notify_all()
-    
-    # 等待并返回结果
     try:
         response = future.result()
         return flask.jsonify(response)
     except Exception as e:
         return flask.jsonify({'error': str(e)}), 500
 
-def run(local_model, local_tokenizer) -> None:
-    # 传入参数
-    global model, tokenizer
-    tokenizer = local_tokenizer
-    model = local_model
+def run_app(api_port):
+    print(f"[{datetime.now()}]", end=" ")
+    app.run(host="0.0.0.0", port=api_port)
 
-    # 启动服务
-    # curl -X POST http://127.0.0.1:5000/chat -H "Content-Type: application/json" -d '{"prompt": "Hello World!"}'
-    log_rank0("curl -X POST http://127.0.0.1:5000/chat -H \"Content-Type: application/json\" -d '{\"prompt\": \"Hello World!\"}'")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+def run_master(model, tokenizer, api_port, service_port) -> None:
+    master_addr = os.environ.get('MASTER_ADDR', 'localhost')
+    server = Server(master_addr, service_port)
+    processor_thread = threading.Thread(target=run_app, args=(api_port,), daemon=True)
+    processor_thread.start()
+    server.start()
+    master_worker(model, tokenizer, server)
+
+def run_slaver(model, tokenizer, service_port) -> None:
+    time.sleep(5)
+    master_addr = os.environ.get('MASTER_ADDR', 'localhost')
+    client = Client(master_addr, service_port)
+    client.connect()
+    client.receive_messages(lambda batch_prompts: batch_generate_response(model, tokenizer, batch_prompts))
+    input()

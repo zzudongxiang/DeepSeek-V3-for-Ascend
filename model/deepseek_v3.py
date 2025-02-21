@@ -11,15 +11,8 @@ from utils.quantization.int8 import int8_dequant
 from model.deepseek.linear import set_linear_args, linear
 from model.deepseek.rope import precompute_freqs_cis, apply_rotary_emb
 
-
-rank, world_size = 0, 1
 offload_cpu = True
-
-try:
-    import torch_npu
-    default_device = "npu"
-except:
-    default_device = "cuda" if torch.cuda.is_available() else "cpu"
+rank, world_size = 0, 1
 
 class ParallelEmbedding(nn.Module):
     def __init__(self, vocab_size: int, dim: int):
@@ -265,8 +258,9 @@ class Expert(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(self, args: ModelArgs, layer_id: int = 0):
+    def __init__(self, args: ModelArgs, device: str, layer_id: int = 0):
         super().__init__()
+        self.device = device
         self.dim = args.dim
         self.layer_id = layer_id
         assert args.n_routed_experts % world_size == 0
@@ -277,7 +271,7 @@ class MoE(nn.Module):
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList([
-            Expert(args.dim, args.moe_inter_dim).to('cpu' if offload_cpu else default_device)
+            Expert(args.dim, args.moe_inter_dim).to('cpu' if offload_cpu else self.device)
             if self.experts_start_idx <= i < self.experts_end_idx else None
             for i in range(self.n_routed_experts)
         ])
@@ -296,7 +290,7 @@ class MoE(nn.Module):
             idx, top = torch.where(indices == i)
             if offload_cpu:
                 x_cpu = x[idx].cpu()
-                y_cpu = expert(x_cpu).to(default_device) * weights[idx, top, None]
+                y_cpu = expert(x_cpu).to(self.device) * weights[idx, top, None]
                 y[idx] += y_cpu.to(x.device)
             else:
                 y[idx] += expert(x[idx]) * weights[idx, top, None]
@@ -307,10 +301,11 @@ class MoE(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, args: ModelArgs, device: str):
         super().__init__()
+        self.device = device
         self.attn = MLA(args, layer_id)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args, layer_id)
+        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args, device, layer_id)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
@@ -321,11 +316,12 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, device: str):
         global world_size, rank
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
         self.args = args
+        self.device = device
         if args.dtype == "fp8":
             Linear.dtype = torch.float8_e4m3fn
         elif args.dtype == "int8":
@@ -340,7 +336,7 @@ class Transformer(nn.Module):
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
-            self.layers.append(Block(layer_id, args))
+            self.layers.append(Block(layer_id, args, self.device))
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
@@ -349,7 +345,7 @@ class Transformer(nn.Module):
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         seqlen = tokens.size(1)
         h = self.embed(tokens)
-        freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
+        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)

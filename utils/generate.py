@@ -1,17 +1,22 @@
 import torch
-import threading
 from typing import List
 from datetime import datetime
+import torch.distributed as dist
 from utils.logger import log_rank0
 from utils.sample import sample_cpu as sample
 from utils.progress import start_progress, stop_progress
 
 generate_progress = 0
 
+def reset_generate_progress():
+    generate_progress = 0
+
 @torch.inference_mode()
 def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]]:
     global generate_progress
-    thread_tokens = start_progress(lambda: generate_progress, description="Generate Progress")
+    thread_tokens = start_progress(lambda: generate_progress,
+                                   reset_generate_progress,
+                                   description="Generate Progress")
 
     max_new_tokens = 2 if warmup else model.args.max_new_tokens
     prompt_lens = [len(t) for t in prompt_tokens]
@@ -23,8 +28,9 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens))
     prompt_mask = tokens != -1
-    t0 = datetime.now()
+    dist.barrier()
     ttft_flag = True
+    t0 = datetime.now()
     for cur_pos in range(min(prompt_lens), total_len):
         generate_progress = cur_pos / total_len
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
