@@ -24,10 +24,10 @@ def log_rank0(*args, **kwargs):
 def format_time(seconds):
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
-    seconds = int(seconds % 60)
+    seconds = seconds % 60
     if hours > 0:
-        return f"{hours}h {minutes}m {seconds}s"
+        return f"{hours}h {minutes}m {seconds:.2f}s"
     elif minutes > 0:
-        return f"{minutes}m {seconds}s"
+        return f"{minutes}m {seconds:.2f}s"
     else:
-        return f"{seconds}s"
+        return f"{seconds:.2f}s"

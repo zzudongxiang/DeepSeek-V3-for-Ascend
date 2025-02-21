@@ -145,7 +145,7 @@ def main(hf_path, save_path):
     for file_path in glob(os.path.join(hf_path, "*token*")):
         new_file_path = os.path.join(save_path, os.path.basename(file_path))
         shutil.copyfile(file_path, new_file_path)
-    os.system(f"rm -rf {mmap_dir}/*.pt")
+    os.system(f"rm -rf {mmap_dir}")
 
 if __name__ == "__main__":
     parser = ArgumentParser()

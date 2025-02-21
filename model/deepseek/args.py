@@ -71,3 +71,11 @@ class ModelArgs:
     @auto_convert_types
     def __setattr__(self, name, value):
         super().__setattr__(name, value)
+
+    def __str__(self):
+        split_line = "-" * 50 + "\n"
+        print_str = "\n" + split_line
+        for k,v in self.__dict__.items():
+            print_str += f"{k:<25} = {v}\n"
+        print_str += split_line
+        return print_str
