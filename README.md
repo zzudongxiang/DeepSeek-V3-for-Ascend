@@ -1,10 +1,73 @@
 # DeepSeek-V3 for Ascend
 
-- 关于`DeepSeek-V3`的文档和相关的权重文档请参考: [DeepSeek-V3](./docs/README.md)和[Weights](./docs/README_WEIGHTS.md)
+## 1 使用说明
 
-## 1 准备Pytorch
+### 1.1 准备工作
 
-### 1.1 准备Conda环境
+#### 1.1.1 转换权重
+
+使用`tools/convert.py`脚本对权重进行转换，支持`fp8->bf16`、`bf16->bf16`、`bf16->int8`、`bf16->int4`四种模式
+
+#### 1.1.2 修改配置文件
+
+配置文件位于`configs/*.json`中，除了修改配置文件外，还可以在启动命令中添加某一项特殊参数
+
+```bash
+bash scripts/inference.sh     \
+    ...                       \
+    --max-batch-size 128      \ # 自定义变量以覆盖配置文件中的变量
+    tee | log/inference.log
+```
+
+### 1.2 离线模式
+
+离线模式是指使用用户选定的文本文件作为输入的prompt进行推理，用户输入的txt文件中每行代表一个prompt，推理结果直接打印在控制台
+
+```bash
+# --startup-type参数表示prompt所在的文本文件路径
+bash scripts/inference.sh                   \
+    --ckpt-path ../ckpt/v3-int4-mp8/        \
+    --config-path configs/config_671B.json  \
+    --model-name deepseek_v3                \
+    --startup-type scripts/inputs.txt       \
+    tee | log/inference.log
+```
+
+### 1.3 交互模式
+
+交互模式是指在控制台直接输入prompt，并在推理完成后将对话显示在控制台，该模式支持历史上下文对话，但是只能使用rank0的卡所在的控制台进行交互
+
+```bash
+# --startup-type设置为interactive表示交互模式
+bash scripts/inference.sh                   \
+    --ckpt-path ../ckpt/v3-int4-mp8/        \
+    --config-path configs/config_671B.json  \
+    --model-name deepseek_v3                \
+    --startup-type interactive              \
+    tee | log/inference.log
+```
+
+### 1.4 在线模式
+
+在线模式是指使用post请求进行对话，该模式仅为最简单的实现，支持批量请求处理
+
+发送请求的python脚本位于`tools/benchmark.py`，用户可以根据需要修改该脚本，以适应不同的需求
+
+```bash
+# --startup-type设置为online表示在线模式
+bash scripts/inference.sh                   \
+    --ckpt-path ../ckpt/v3-int4-mp8/        \
+    --config-path configs/config_671B.json  \
+    --model-name deepseek_v3                \
+    --startup-type online                   \
+    tee | log/inference.log
+```
+
+## 2 环境准备
+
+### 2.1 准备Pytorch
+
+#### 2.1.1 准备Conda环境
 
 ```bash
 # 创建deepseek环境
@@ -24,7 +87,7 @@ op-compile-tool 0.1.0 requires inspect, which is not installed.
 op-compile-tool 0.1.0 requires multiprocessing, which is not installed.
 ```
 
-### 1.2 安装`torch_npu`
+#### 2.1.2 安装`torch_npu`
 
 ```bash
 # 确认本地安装的pytorch版本
@@ -35,7 +98,7 @@ wget https://gitee.com/ascend/pytorch/releases/download/v6.0.rc2-pytorch2.1.0/to
 pip install ./torch_npu-*.whl
 ```
 
-### 1.3 验证安装结果
+#### 2.1.3 验证安装结果
 
 ```bash
 python -c "import torch; import torch_npu; print(torch_npu.__version__)"
@@ -51,9 +114,9 @@ python -c "import torch; import torch_npu; print(torch_npu.__version__)"
 2.1.0.post6
 ```
 
-## 2 安装Apex
+### 2.2 安装Apex
 
-### 2.1 获取apex包
+#### 2.2.1 获取apex包
 
 ```bash
 # 建议在独立的路径~/llm中安装以下包
@@ -62,7 +125,7 @@ cd ~/llm
 git clone https://gitee.com/ascend/apex.git
 ```
 
-### 2.2 原生apex下载加速（可选）
+#### 2.2.2 原生apex下载加速（可选）
 
 ```bash
 # 切换到已经下载好的gitee仓库中
@@ -73,7 +136,7 @@ git clone https://github.com/NVIDIA/apex.git
 # 修改apex/scripts/build.sh的脚本，注释掉以上内容（102~104行）
 ```
 
-### 2.3 编译apex包
+#### 2.2.3 编译apex包
 
 ```bash
 # 安装apex加速包
@@ -83,7 +146,7 @@ bash scripts/build.sh --python=3.9
 # 注释掉：patch -p1 <npu.patch
 ```
 
-### 2.4 安装apex
+#### 2.2.4 安装apex
 
 ```bash
 # 切换到apex/dist路径下
@@ -93,7 +156,7 @@ pip uninstall apex -y
 pip install --upgrade apex-*.whl
 ```
 
-### 2.5 验证安装结果
+#### 2.2.5 验证安装结果
 
 ```bash
 pip show apex
@@ -114,9 +177,9 @@ Requires:
 Required-by
 ```
 
-## 3 安装Megatron-LM
+### 2.3 安装Megatron-LM
 
-### 3.1 获取Megatron-LM
+#### 2.3.1 获取Megatron-LM
 
 ```bash
 # 建议在独立的路径~/llm中安装以下包
@@ -128,13 +191,13 @@ cd Megatron-LM
 git checkout core_r0.8.0
 ```
 
-### 3.2 安装Megatron-LM
+#### 2.3.2 安装Megatron-LM
 
 ```bash
 pip install -e . -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
-### 3.3 验证安装结果
+#### 2.3.3 验证安装结果
 
 ```bash
 pip show megatron_core
@@ -156,9 +219,9 @@ Requires:
 Required-by:
 ```
 
-## 4 安装MindSpeed
+### 2.4 安装MindSpeed
 
-### 4.1 获取MindSpeed
+#### 2.4.1 获取MindSpeed
 
 ```bash
 # 建议在独立的路径~/llm中安装以下包
@@ -170,7 +233,7 @@ cd MindSpeed
 git checkout 9b3ad3fd928
 ```
 
-### 4.2 安装MindSpeed
+#### 2.4.2 安装MindSpeed
 
 ```bash
 # 切换到MindSpeed路径
@@ -180,7 +243,7 @@ pip install -e . -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 export PYTHONPATH=$PYTHONPATH:/home/<USER_NAME>/llm/Megatron-LM
 ```
 
-### 4.3 验证安装结果
+#### 2.4.3 验证安装结果
 
 ```bash
 pip show mindspeed
