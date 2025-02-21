@@ -5,7 +5,14 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 OUT_PUT="log"
 rm -rf ${OUT_PUT} && mkdir -p ${OUT_PUT}
 
-msprof --application="bash scripts/inference.sh" \
+ARGS="
+    --ckpt-path ../ckpt/v3-bf16-mp32    \
+    --config configs/config_671B.json   \
+    --model-name deepseek_hf            \
+    --startup-type ./scripts/inputs.txt \
+"
+
+msprof --application="bash scripts/inference.sh ${ARGS}" \
     --output=${OUT_PUT} \
     --ascendcl=on \
     --model-execution=on \

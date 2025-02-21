@@ -21,4 +21,4 @@ torchvision==0.16.0
 # DeepSeek依赖的包
 transformers==4.46.3
 safetensors>=0.4.5
-# triton==3.0.0 # Ascend平台不支持该工具
+flask

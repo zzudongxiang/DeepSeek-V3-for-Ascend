@@ -22,12 +22,12 @@ GPUS_PER_NODE=8
 MASTER_PORT=6000
 WORLD_SIZE=$((GPUS_PER_NODE*NNODES))
 
-echo ----------------------------
-echo MASTER_ADDR=${MASTER_ADDR}
-echo MASTER_PORT=${MASTER_PORT}
-echo NODE_RANK=${NODE_RANK}
-echo NNODES=${NNODES}
-echo ----------------------------
+echo ============================
+echo MASTER_ADDR = ${MASTER_ADDR}
+echo MASTER_PORT = ${MASTER_PORT}
+echo NODE_RANK = ${NODE_RANK}
+echo NNODES = ${NNODES}
+echo ============================
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -37,10 +37,4 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 
-# ../ckpt/r1-fp8-mp8
-# ../ckpt/v3-bf16-mp32
-torchrun $DISTRIBUTED_ARGS inference.py             \
-    --ckpt-path ../ckpt/v3-int8-mp16/               \
-    --input-file scripts/inputs_128.txt             \
-    --config configs/config_671B.json               \
-    | tee log/inference.log
+torchrun $DISTRIBUTED_ARGS inference.py "$@" | tee log/inference.log

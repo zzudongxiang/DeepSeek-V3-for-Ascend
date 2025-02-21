@@ -1,56 +1,25 @@
 import math
-from dataclasses import dataclass
-from typing import Tuple, Optional, Literal
-
 import torch
-import torch_npu
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from typing import Tuple, Optional
+from model.deepseek.args import ModelArgs
+from utils.quantization.fp8 import fp8_dequant
+from utils.quantization.int4 import int4_dequant
+from utils.quantization.int8 import int8_dequant
+from model.deepseek.linear import set_linear_args, linear
+from model.deepseek.rope import precompute_freqs_cis, apply_rotary_emb
 
-# from kernel import act_quant, weight_dequant, fp8_gemm
 
+rank, world_size = 0, 1
+offload_cpu = True
 
-world_size = 1
-rank = 0
-block_size = 128
-gemm_impl: Literal["bf16", "fp8", "int8"] = "int8"
-attn_impl: Literal["naive", "absorb"] = "absorb"
-
-@dataclass
-class ModelArgs:
-    max_batch_size: int = 128
-    max_seq_len: int = 1024
-    dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 102400
-    dim: int = 2048
-    inter_dim: int = 10944
-    moe_inter_dim: int = 1408
-    n_layers: int = 27
-    n_dense_layers: int = 1
-    n_heads: int = 16
-    # moe
-    n_routed_experts: int = 64
-    n_shared_experts: int = 2
-    n_activated_experts: int = 6
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
-    score_func: Literal["softmax", "sigmoid"] = "softmax"
-    route_scale: float = 1.
-    # mla
-    q_lora_rank: int = 0
-    kv_lora_rank: int = 512
-    qk_nope_head_dim: int = 128
-    qk_rope_head_dim: int = 64
-    v_head_dim: int = 128
-    # yarn
-    original_seq_len: int = 4096
-    rope_theta: float = 10000.0
-    rope_factor: float = 40
-    beta_fast: int = 32
-    beta_slow: int = 1
-    mscale: float = 1.
-
+try:
+    import torch_npu
+    default_device = "npu"
+except:
+    default_device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class ParallelEmbedding(nn.Module):
     def __init__(self, vocab_size: int, dim: int):
@@ -75,39 +44,6 @@ class ParallelEmbedding(nn.Module):
         return y
 
 
-def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    if weight.element_size() > 1:
-        return F.linear(x, weight, bias)
-    elif gemm_impl == "int8":
-        # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC2/apiref/apilist/ptaoplist_000465.html
-        # return torch_npu.npu_weight_quant_batchmatmul(x, weight, weight.scale.to(torch.bfloat16), bias=bias)
-
-        # 方案1: 手动对x做量化然后再进行矩阵乘法（影响性能）
-        # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC2/apiref/apilist/ptaoplist_000464.html
-        # max_val = torch.max(torch.abs(x))
-        # scale = (max_val / 127.0) if max_val > 0 else 1
-        # x = torch.clamp(torch.round(x / scale), min=-128, max=127).to(torch.int8)
-        # return torch_npu.npu_quant_matmul(x, weight, weight.scale, bias=bias).to(torch.bfloat16) * scale
-
-        # 方案2: 使用算子自带的量化手段对x进行量化（性能手动对x量化的方案好）
-        # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC2/apiref/apilist/ptaoplist_000464.html
-        if len(x.shape) > 2:
-            batch_size, seq_len, hidden_dim = x.shape
-            x_reshaped = x.view(-1, hidden_dim)
-            y = torch_npu.npu_weight_quant_batchmatmul(x_reshaped, weight, weight.scale, bias=bias)
-            return y.view(batch_size, seq_len, -1)
-        else:
-            return torch_npu.npu_weight_quant_batchmatmul(x, weight, weight.scale, bias=bias)
-    else:
-        raise Exception("unsupport gemm impl")
-    # else:
-    #     x, scale = act_quant(x, block_size)
-    #     y = fp8_gemm(x, scale, weight, weight.scale)
-    #     if bias is not None:
-    #         y += bias
-    #     return y
-
-
 class Linear(nn.Module):
     dtype = torch.bfloat16
 
@@ -115,14 +51,13 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        if dtype is None:
+        if dtype is None and Linear.dtype == torch.int8:
             # 由于使用torch_npu的MatMul算子，需要对Weight转置，所以提前转置Weight矩阵
             self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=dtype or Linear.dtype), requires_grad=False)
         else:
             # embed层不需要量化处理，所以不需要转置Weight
             self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype), requires_grad=False)
-        if self.weight.element_size() == 1:
-            # 暂时不支持Block的量化操作，需要改变Scale的维度
+        if self.weight.dtype != torch.bfloat16:
             self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, dtype=torch.bfloat16))
         else:
             self.register_parameter("scale", None)
@@ -173,52 +108,10 @@ class RMSNorm(nn.Module):
         return y.type_as(self.weight) * self.weight
 
 
-def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
-    dim = args.qk_rope_head_dim
-    seqlen = args.max_seq_len
-    beta_fast = args.beta_fast
-    beta_slow = args.beta_slow
-    base = args.rope_theta
-    factor = args.rope_factor
-
-    def find_correction_dim(num_rotations, dim, base, max_seq_len):
-        return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
-
-    def find_correction_range(low_rot, high_rot, dim, base, max_seq_len):
-        low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
-        high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
-        return max(low, 0), min(high, dim-1)
-
-    def linear_ramp_factor(min, max, dim):
-        if min == max:
-            max += 0.001
-        linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
-        ramp_func = torch.clamp(linear_func, 0, 1)
-        return ramp_func
-
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    if seqlen > args.original_seq_len:
-        low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.original_seq_len)
-        smooth = 1 - linear_ramp_factor(low, high, dim // 2)
-        freqs = freqs / factor * (1 - smooth) + freqs * smooth
-
-    t = torch.arange(seqlen)
-    freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs_cis
-
-
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
-    return y.to(dtype)
-
-
 class MLA(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_id: int = 0):
         super().__init__()
+        self.args = args
         self.dim = args.dim
         self.n_heads = args.n_heads
         self.n_local_heads = args.n_heads // world_size
@@ -228,6 +121,7 @@ class MLA(nn.Module):
         self.qk_rope_head_dim = args.qk_rope_head_dim
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.v_head_dim = args.v_head_dim
+        self.layer_id = layer_id
 
         if self.q_lora_rank == 0:
             self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)
@@ -244,7 +138,7 @@ class MLA(nn.Module):
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        if attn_impl == "naive":
+        if args.attn_impl == "naive":
             self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
             self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
         else:
@@ -264,7 +158,7 @@ class MLA(nn.Module):
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
-        if attn_impl == "naive":
+        if self.args.attn_impl == "naive":
             q = torch.cat([q_nope, q_pe], dim=-1)
             kv = self.wkv_b(self.kv_norm(kv))
             kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -274,7 +168,16 @@ class MLA(nn.Module):
             self.v_cache[:bsz, start_pos:end_pos] = v
             scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
         else:
-            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else self.wkv_b.weight.to(torch.bfloat16) * self.wkv_b.scale
+            if self.wkv_b.weight.dtype == torch.bfloat16:
+                wkv_b = self.wkv_b.weight
+            elif self.wkv_b.weight.dtype == torch.float8_e4m3fn:
+                wkv_b = fp8_dequant(self.wkv_b.weight, self.wkv_b.scale)
+            elif self.wkv_b.weight.dtype == torch.int8:
+                wkv_b = int8_dequant(self.wkv_b.weight, self.wkv_b.scale).T
+            elif self.wkv_b.weight.dtype == torch.int32:
+                wkv_b = int4_dequant(self.wkv_b.weight, self.wkv_b.scale)
+            else:
+                raise NotImplementedError(f"Unsupported dtype: {self.wkv_b.weight.dtype}")
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
             self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
@@ -284,7 +187,7 @@ class MLA(nn.Module):
         if mask is not None:
             scores += mask.unsqueeze(1)
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
-        if attn_impl == "naive":
+        if self.args.attn_impl == "naive":
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
@@ -343,20 +246,23 @@ class Gate(nn.Module):
 
 
 class Expert(nn.Module):
-    def __init__(self, dim: int, inter_dim: int):
+    def __init__(self, dim: int, inter_dim: int, layer_id: int = 0, expert_id: int = 0):
         super().__init__()
-        self.w1 = Linear(dim, inter_dim) # int8: [7168, 2048] / [2048]
+        self.w1 = Linear(dim, inter_dim)
         self.w2 = Linear(inter_dim, dim)
         self.w3 = Linear(dim, inter_dim)
+        self.expert_id = expert_id
+        self.layer_id = layer_id
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
 class MoE(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_id: int = 0):
         super().__init__()
         self.dim = args.dim
+        self.layer_id = layer_id
         assert args.n_routed_experts % world_size == 0
         self.n_routed_experts = args.n_routed_experts
         self.n_local_experts = args.n_routed_experts // world_size
@@ -364,8 +270,11 @@ class MoE(nn.Module):
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
-                                      for i in range(self.n_routed_experts)])
+        self.experts = nn.ModuleList([
+            Expert(args.dim, args.moe_inter_dim).to('cpu' if offload_cpu else default_device)
+            if self.experts_start_idx <= i < self.experts_end_idx else None
+            for i in range(self.n_routed_experts)
+        ])
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -379,7 +288,12 @@ class MoE(nn.Module):
                 continue
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
-            y[idx] += expert(x[idx]) * weights[idx, top, None]
+            if offload_cpu:
+                x_cpu = x[idx].cpu()
+                y_cpu = expert(x_cpu).to(default_device) * weights[idx, top, None]
+                y[idx] += y_cpu.to(x.device)
+            else:
+                y[idx] += expert(x[idx]) * weights[idx, top, None]
         z = self.shared_experts(x)
         if world_size > 1:
             dist.all_reduce(y)
@@ -389,8 +303,8 @@ class MoE(nn.Module):
 class Block(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
-        self.attn = MLA(args)
-        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
+        self.attn = MLA(args, layer_id)
+        self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args, layer_id)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
@@ -405,12 +319,16 @@ class Transformer(nn.Module):
         global world_size, rank
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
+        self.args = args
         if args.dtype == "fp8":
             Linear.dtype = torch.float8_e4m3fn
         elif args.dtype == "int8":
             Linear.dtype = torch.int8
+        elif args.dtype == "int4":
+            Linear.dtype = torch.int32
         else:
             Linear.dtype = torch.bfloat16
+        set_linear_args(args.gemm_impl, args.fp8_quant_block_size)
         super().__init__()
         self.max_seq_len = args.max_seq_len
         self.embed = ParallelEmbedding(args.vocab_size, args.dim)

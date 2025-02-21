@@ -1,11 +1,15 @@
 {
-    // 使用 IntelliSense 了解相关属性。 
-    // 悬停以查看现有属性的描述。
-    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Inference-Single-GPU",
+            "name": "Python Debug",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Single Inference",
             "type": "debugpy",
             "request": "launch",
             "program": "inference.py",
@@ -16,13 +20,14 @@
                 "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
             },
             "args": [
-                "--ckpt-path", "ckpt",
-                "--config", "configs/config_671B_test.json",
-                "--input-file", "scripts/inputs.txt"
+                "--ckpt-path=ckpt",
+                "--config-path=configs/config_debug.json",
+                "--startup-type=scripts/inputs.txt",
+                "--model-name=deepseek_v3"
             ]
         },
         {
-            "name": "Inference-Multi-NPU",
+            "name": "Multi Inference",
             "type": "debugpy",
             "request": "launch",
             "module": "torch.distributed.launch",
@@ -37,53 +42,12 @@
                 "--nnodes", "1",
                 "--node_rank", "0",
                 "--master_addr", "localhost",
-                "--master_port", "6001",
+                "--master_port", "6000",
                 "inference.py",
-                "--ckpt-path", "ckpt",
-                "--config", "configs/config_671B_test.json",
-                "--input-file", "scripts/inputs.txt"
-            ]
-        },
-        {
-            "name": "Pretrain-Single-GPU",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "pretrain.py",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-                "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
-            },
-            "args": [
-                "--ckpt-path", "ckpt",
-                "--ckpt-saved-path", "ckpt-saved",
-                "--config", "configs/config_16B.json",
-                "--use-random-weights",
-            ]
-        },
-        {
-            "name": "Pretrain-Multi-NPU",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "torch.distributed.launch",
-            "console": "integratedTerminal",
-            "env": {
-                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-                "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
-            },
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--nproc_per_node", "8",
-                "--nnodes", "1",
-                "--node_rank", "0",
-                "--master_addr", "localhost",
-                "--master_port", "6001",
-                "pretrain.py",
-                "--ckpt-path", "ckpt",
-                "--ckpt-saved-path", "ckpt-saved",
-                "--config", "configs/config_16B.json",
-                "--use-random-weights",
+                "--ckpt-path=ckpt",
+                "--config-path=configs/config_debug.json",
+                "--startup-type=scripts/inputs.txt",
+                "--model-name=deepseek_v3"
             ]
         },
     ]

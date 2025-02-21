@@ -1,4 +1,4 @@
-import os, re
+import os
 import shutil
 from argparse import ArgumentParser
 from glob import glob
@@ -29,34 +29,9 @@ mapping = {
     "scale": ("scale", None),
 }
 
-ms_to_hf_name_map = {
-    "tok_embeddings.embedding_weight": "embed_tokens.weight",
-    "lm_head.weight": "lm_head.weight",
-    "model.norm_out.weight": "model.norm.weight",
-    "attention_norm.weight": "input_layernorm.weight",
-    "feed_forward.w2.weight": "mlp.down_proj.weight",
-    "feed_forward.w1.weight": "mlp.gate_proj.weight",
-    "feed_forward.w3.weight": "mlp.up_proj.weight",
-    "ffn_norm.weight": "post_attention_layernorm.weight",
-    "attention.lkv_norm.weight": "self_attn.kv_a_layernorm.weight",
-    "attention.kv2l.weight": "self_attn.kv_a_proj_with_mqa.weight",
-    "attention.lkv2kv.weight": "self_attn.kv_b_proj.weight",
-    "attention.wo.weight": "self_attn.o_proj.weight",
-    "attention.lq_norm.weight": "self_attn.q_a_layernorm.weight",
-    "attention.q2l_proj.weight": "self_attn.q_a_proj.weight",
-    "attention.l2q_proj.weight": "self_attn.q_b_proj.weight",
-    "feed_forward.routed_experts.router.e_score_correction_bias": "mlp.gate.e_score_correction_bias",
-    "feed_forward.routed_experts.router.dense.weight": "mlp.gate.weight",
-    "feed_forward.shared_experts.w2.weight": "mlp.shared_experts.down_proj.weight",
-    "feed_forward.shared_experts.w1.weight": "mlp.shared_experts.gate_proj.weight",
-    "feed_forward.shared_experts.w3.weight": "mlp.shared_experts.up_proj.weight",
-    "feed_forward.routed_experts.ffn.w1.weight": "mlp.experts.*.gate_proj.weight",
-    "feed_forward.routed_experts.ffn.w2.weight": "mlp.experts.*.down_proj.weight",
-    "feed_forward.routed_experts.ffn.w3.weight": "mlp.experts.*.up_proj.weight",
-}
 
 def main(hf_ckpt_path, save_path, n_experts, mp):
-    torch.set_num_threads(92)
+    torch.set_num_threads(8)
     n_local_experts = n_experts // mp
     state_dicts = [{} for _ in range(mp)]
 
@@ -66,12 +41,6 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                 if "model.layers.61" in name:
                     continue
                 param: torch.Tensor = f.get_tensor(name)
-                # 替换变量名
-                for pattern in ms_to_hf_name_map:
-                    if pattern in name:
-                        name = name.replace(pattern, ms_to_hf_name_map[pattern])
-                        break
-                # 原有逻辑
                 if name.startswith("model."):
                     name = name[len("model."):]
                 name = name.replace("self_attn", "attn")
@@ -106,12 +75,10 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--hf-ckpt-path", type=str, default="../mindspore-dsv3-hf")
-    parser.add_argument("--save-path", type=str, default="../ckpt/v3-bf16-mp32-ms")
-    parser.add_argument("--n-experts", type=int, default=256)
-    parser.add_argument("--model-parallel", type=int, default=32)
+    parser.add_argument("--hf-ckpt-path", type=str, required=True)
+    parser.add_argument("--save-path", type=str, required=True)
+    parser.add_argument("--n-experts", type=int, required=True)
+    parser.add_argument("--model-parallel", type=int, default=1)
     args = parser.parse_args()
     assert args.n_experts % args.model_parallel == 0
-
-    # 按照模型并行的方法将权重拆分到多个节点上
     main(args.hf_ckpt_path, args.save_path, args.n_experts, args.model_parallel)
