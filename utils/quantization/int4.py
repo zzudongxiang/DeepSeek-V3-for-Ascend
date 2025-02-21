@@ -11,6 +11,6 @@ def int4_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return quantized_x.to(torch.int32), scales_per_dim.to(torch.bfloat16)
 
 def int4_dequant(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    ones = torch.ones(x.shape[0], x.shape[0], device=x.device, dtype=torch.bfloat16)
-    x = torch_npu.npu_weight_quant_batchmatmul(ones, x, scale)
+    identity = torch.eye(x.shape[0], dtype=torch.bfloat16, device=x.device)
+    x = torch_npu.npu_weight_quant_batchmatmul(identity, x, scale)
     return x.to(torch.bfloat16)

@@ -181,7 +181,7 @@ class MLA(nn.Module):
             elif self.wkv_b.weight.dtype == torch.int8:
                 wkv_b = int8_dequant(self.wkv_b.weight, self.wkv_b.scale).T
             elif self.wkv_b.weight.dtype == torch.int32:
-                wkv_b = int4_dequant(self.wkv_b.weight, self.wkv_b.scale)
+                wkv_b = int4_dequant(self.wkv_b.weight, self.wkv_b.scale).T
             else:
                 raise NotImplementedError(f"Unsupported dtype: {self.wkv_b.weight.dtype}")
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)

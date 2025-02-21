@@ -52,7 +52,7 @@ def quant_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Ten
     elif gemm_impl == "naive":
         return npu_weight_quant_batchmatmul(x, weight, weight.scale, bias)
     else:
-        raise NotImplementedError(f"Unsupported gemm_impl: {gemm_impl} for torch.int8")
+        raise NotImplementedError(f"Unsupported gemm_impl: {gemm_impl} for {gemm_impl}")
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     if (x.is_cpu or weight.is_cpu) and not cpu_gemm_support:
