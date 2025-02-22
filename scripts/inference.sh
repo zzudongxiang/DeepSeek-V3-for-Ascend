@@ -37,4 +37,4 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 
-torchrun $DISTRIBUTED_ARGS inference.py "$@" | tee log/inference.log
+torchrun $DISTRIBUTED_ARGS inference.py "$@"

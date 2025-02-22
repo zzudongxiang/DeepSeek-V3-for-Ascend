@@ -26,6 +26,6 @@
     "attn_impl": "absorb",
     "max_new_tokens": 100,
     "temperature":0,
-    "offload_cpu": true,
+    "offload_cpu": false,
     "use_random_weights": true
 }
