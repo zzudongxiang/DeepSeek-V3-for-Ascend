@@ -53,13 +53,19 @@ def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup
         args = ModelArgs(**json.load(f))
     args_index = 0
     while args_index < len(model_args):
-        key = model_args[args_index].replace("--", "").replace("-", "_")
-        if hasattr(args, key):
+        arg = model_args[args_index].replace("--", "")
+        if "=" in arg:
+            key = arg.split("=")[0].replace("-", "_")
+            value = "=".join(arg.split("=")[1:])
+            args_index += 1
+        else:
+            key = arg.replace("-", "_")
             value = model_args[args_index + 1]
+            args_index += 2
+        if hasattr(args, key):
             setattr(args, key, value)
         else:
-            log_rank0(f"Unknow args: {key}")
-        args_index += 2
+            log_rank0(f"Unknow args: {key} = {value}")
     log_rank0(args)
 
     with torch.device(default_device):
