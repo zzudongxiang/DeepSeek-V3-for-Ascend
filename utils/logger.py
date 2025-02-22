@@ -5,9 +5,12 @@ rank = int(os.getenv("RANK", "0"))
 log_filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 try:
-    if not os.path.exists("log"):
-        os.makedirs("log", exist_ok=True)
-    log_file = open(f"log/{log_filename}.log", "w+", encoding="utf8")
+    if rank == 0:
+        if not os.path.exists("log"):
+            os.makedirs("log", exist_ok=True)
+        log_file = open(f"log/{log_filename}.log", "w+", encoding="utf8")
+    else:
+        log_file = None
 except:
     log_file = None
     print(f"Unable to write to log file: {log_filename}")
