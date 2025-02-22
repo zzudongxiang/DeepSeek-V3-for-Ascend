@@ -28,7 +28,8 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens))
     prompt_mask = tokens != -1
-    dist.barrier()
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.barrier()
     ttft_flag = True
     t0 = datetime.now()
     for cur_pos in range(min(prompt_lens), total_len):

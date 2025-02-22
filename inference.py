@@ -6,10 +6,10 @@ import torch
 import importlib
 from datetime import datetime
 import torch.distributed as dist
+from safetensors import safe_open
 from utils.logger import log_rank0
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
-from safetensors.torch import load_model
 from utils.generate import batch_generate
 from model.deepseek.args import ModelArgs
 from utils.progress import start_progress, stop_progress
@@ -24,13 +24,20 @@ except:
 
 
 def load_model_weight(model, ckpt_path):
+    progress_value = 0
     ckpt_file_path = os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors")
-    weight_size = os.path.getsize(ckpt_file_path)
-    base_capacity = torch.cuda.memory_cached()
-    thread_tokens = start_progress(lambda: (torch.cuda.memory_cached() - base_capacity) / weight_size,
+    thread_tokens = start_progress(lambda: progress_value,
                                    description="Load Weight Progress",
                                    interval=30)
-    load_model(model, ckpt_file_path)
+    model_state_dict = model.state_dict()
+    with safe_open(ckpt_file_path, framework="pt") as f:
+        load_index = 0
+        total_num = len(f.keys())
+        for k in f.keys():
+            assert k in model_state_dict
+            model_state_dict[k].copy_(f.get_tensor(k))
+            progress_value = load_index / total_num
+            load_index += 1
     stop_progress(thread_tokens)
 
 def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup_type: str = "online") -> None:

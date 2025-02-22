@@ -35,5 +35,4 @@ def fp8_dequant(x: torch.Tensor, scale: torch.Tensor, block_size: int = 128) -> 
     scale_expanded = scale_expanded[:M, :N]
     dequantized_weight = x * scale_expanded
     dequantized_weight = dequantized_weight.to(torch.get_default_dtype())
-
     return dequantized_weight
