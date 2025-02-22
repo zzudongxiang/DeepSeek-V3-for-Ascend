@@ -9,11 +9,14 @@ from utils.progress import start_progress, stop_progress
 generate_progress = 0
 
 def reset_generate_progress():
+    global generate_progress
     generate_progress = 0
 
 @torch.inference_mode()
 def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]]:
     global generate_progress
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.barrier()
     thread_tokens = start_progress(lambda: generate_progress,
                                    reset_generate_progress,
                                    description="Generate Progress")
@@ -28,8 +31,6 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens))
     prompt_mask = tokens != -1
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        dist.barrier()
     ttft_flag = True
     t0 = datetime.now()
     for cur_pos in range(min(prompt_lens), total_len):

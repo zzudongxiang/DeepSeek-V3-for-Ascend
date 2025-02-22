@@ -27,18 +27,22 @@ def load_model_weight(model, ckpt_path):
     progress_value = 0
     ckpt_file_path = os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors")
     thread_tokens = start_progress(lambda: progress_value,
-                                   description="Load Weight Progress",
+                                   description="Load Model Weight",
                                    interval=30)
     model_state_dict = model.state_dict()
     with safe_open(ckpt_file_path, framework="pt") as f:
         load_index = 0
         total_num = len(f.keys())
-        for k in f.keys():
-            assert k in model_state_dict
+        for k in model_state_dict:
+            assert k in f.keys(), k
             model_state_dict[k].copy_(f.get_tensor(k))
             progress_value = load_index / total_num
             load_index += 1
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.barrier()
     stop_progress(thread_tokens)
+    hbm = torch.cuda.memory_cached() / 1024.0 / 1024.0 / 1024.0
+    log_rank0(f"{hbm:.2f}GB Memory in Used")
 
 def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup_type: str = "online") -> None:
     torch.set_default_dtype(torch.bfloat16)
