@@ -46,7 +46,7 @@ if __name__ == "__main__":
             # 测试场景1: 并行对话请求
             with open(args.input_file) as f:
                 prompts = [line.strip() for line in f.readlines()]
-            results = get_batch_response(prompts[:16])
+            results = get_batch_response(prompts)
             for prompt, result in zip(prompts, results):
                 # TODO: 对响应的内容进行评分
                 print(prompt, result)

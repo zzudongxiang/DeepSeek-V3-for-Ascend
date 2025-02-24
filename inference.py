@@ -71,8 +71,12 @@ def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup
             args_index += 1
         else:
             key = arg.replace("-", "_")
-            value = model_args[args_index + 1]
-            args_index += 2
+            if args_index < len(model_args) - 1:
+                value = model_args[args_index + 1]
+                args_index += 2
+            else:
+                args_index += 1
+                continue
         if hasattr(args, key):
             setattr(args, key, value)
         else:

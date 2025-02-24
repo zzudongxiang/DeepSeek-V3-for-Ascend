@@ -6,9 +6,9 @@ OUT_PUT="log"
 rm -rf ${OUT_PUT} && mkdir -p ${OUT_PUT}
 
 ARGS="
-    --ckpt-path ../ckpt/v3-bf16-mp32    \
+    --ckpt-path ../ckpt/v3-int4-mp8     \
     --config configs/config_671B.json   \
-    --model-name deepseek_hf            \
+    --model-name deepseek_v3            \
     --startup-type ./scripts/inputs.txt \
 "
 
