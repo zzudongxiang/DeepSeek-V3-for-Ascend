@@ -1,6 +1,8 @@
+import json
 import functools
 from typing import Literal
 from dataclasses import dataclass
+from utils.logger import log_rank0
 from typing_extensions import get_origin
 from typing import get_type_hints, Literal, get_args
 
@@ -87,3 +89,28 @@ class ModelArgs:
             print_str += f"{k:<25} = {v}\n"
         print_str += split_line
         return print_str
+
+def get_model_args(config_path, update_list):
+    with open(config_path) as f:
+        args = ModelArgs(**json.load(f))
+    args_index = 0
+    while args_index < len(update_list):
+        arg = update_list[args_index].replace("--", "")
+        if "=" in arg:
+            key = arg.split("=")[0].replace("-", "_")
+            value = "=".join(arg.split("=")[1:])
+            args_index += 1
+        else:
+            key = arg.replace("-", "_")
+            if args_index < len(update_list) - 1:
+                value = update_list[args_index + 1]
+                args_index += 2
+            else:
+                args_index += 1
+                continue
+        if hasattr(args, key):
+            setattr(args, key, value)
+        else:
+            log_rank0(f"Unknow args: {key} = {value}")
+    log_rank0(args)
+    return args

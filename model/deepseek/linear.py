@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 import torch.nn.functional as F
 from utils.quantization.fp8 import fp8_dequant
 from utils.quantization.int4 import int4_dequant
@@ -90,3 +91,33 @@ def get_linear(weight, x_shape="ND"):
                 raise NotImplementedError(f"Unsupported x_shape: {x_shape} for {gemm_impl}")
     else:
         raise NotImplementedError(f"Unsupported gemm_impl: {gemm_impl} for {gemm_impl} with cpu_offload: {offload_cpu}")
+
+class Linear(nn.Module):
+    dtype = torch.bfloat16
+
+    def __init__(self, in_features, out_features, bias=False, dtype=None, x_shape="ND"):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        if dtype is None and Linear.dtype != torch.bfloat16:
+            if Linear.dtype == torch.int8:
+                self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=Linear.dtype), requires_grad=False)
+            elif Linear.dtype == torch.int32:
+                assert out_features % 8 == 0
+                self.weight = nn.Parameter(torch.empty(in_features, out_features // 8, dtype=Linear.dtype), requires_grad=False)
+            else:
+                raise ValueError(f"Unsupported dtype: {Linear.dtype}")
+        else:
+            self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype), requires_grad=False)
+        if self.weight.dtype != torch.bfloat16:
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(out_features, dtype=torch.bfloat16))
+        else:
+            self.register_parameter("scale", None)
+        if bias:
+            self.bias = nn.Parameter(torch.empty(self.part_out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.linear = get_linear(self.weight, x_shape)
+
+    def forward(self, x):
+        return self.linear(x, self.weight, self.bias)

@@ -1,10 +1,8 @@
 import math
 import torch
 from torch import nn
-from typing import Tuple
 import torch.nn.functional as F
 import torch.distributed as dist
-from model.deepseek.args import ModelArgs
 from model.deepseek.rms_norm import RMSNorm
 from utils.quantization.fp8 import fp8_dequant
 from utils.quantization.int4 import int4_dequant
@@ -12,19 +10,21 @@ from utils.quantization.int8 import int8_dequant
 from model.deepseek.linear import set_linear_args, get_linear, Linear
 from model.deepseek.rope import precompute_freqs_cis, apply_rotary_emb
 
-rank, world_size = 0, 1
 
 class ParallelEmbedding(nn.Module):
-    def __init__(self, vocab_size: int, dim: int):
+    def __init__(self, vocab_size, dim, group=None):
         super().__init__()
-        self.vocab_size = vocab_size
         self.dim = dim
-        assert vocab_size % world_size == 0
-        self.part_vocab_size = (vocab_size // world_size)
-        self.vocab_start_idx = rank * self.part_vocab_size
+        self.group = group
+        self.vocab_size = vocab_size
+        self.local_rank = dist.get_rank(group=self.group) if dist.is_initialized() else 0
+        self.group_size = dist.get_world_size(group=self.group) if dist.is_initialized() else 1
+        assert vocab_size % self.group_size == 0
+        self.part_vocab_size = (vocab_size // self.group_size)
+        self.vocab_start_idx = self.local_rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
-        if world_size > 1:
+        if self.group_size > 1:
             self.parallel_split = self.parallel_split
             self.parallel_merge = self.parallel_merge
         else:
@@ -39,7 +39,7 @@ class ParallelEmbedding(nn.Module):
 
     def parallel_merge(self, x, mask):
         x[mask] = 0
-        dist.all_reduce(x)
+        dist.all_reduce(x, group=self.group)
         return x
 
     def forward(self, x):
@@ -49,39 +49,45 @@ class ParallelEmbedding(nn.Module):
 
 
 class ColumnParallelLinear(Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, x_shape="ND"):
-        assert out_features % world_size == 0
-        self.part_out_features = out_features // world_size
+    def __init__(self, in_features, out_features, bias=False, dtype=None, x_shape="ND", group=None):
+        self.group = group
+        self.local_rank = dist.get_rank(group=group) if dist.is_initialized() else 0
+        self.group_size =  dist.get_world_size(group=group) if dist.is_initialized() else 1
+        assert out_features % self.group_size == 0
+        self.part_out_features = out_features // self.group_size
         super().__init__(in_features, self.part_out_features, bias, dtype, x_shape)
         self.linear = get_linear(self.weight, x_shape)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.linear(x, self.weight, self.bias)
 
 
 class RowParallelLinear(Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None, x_shape="ND"):
-        assert in_features % world_size == 0
-        self.part_in_features = in_features // world_size
+    def __init__(self, in_features, out_features, bias=False, dtype=None, x_shape="ND", group=None):
+        self.group = group
+        self.group_size = dist.get_world_size(group=group) if dist.is_initialized() else 1
+        assert in_features % self.group_size == 0
+        self.part_in_features = in_features // self.group_size
         super().__init__(self.part_in_features, out_features, bias, dtype, x_shape)
-        self.data_reduce = self.data_reduce if world_size > 1 else lambda x: x
+        self.data_reduce = self.data_reduce if self.group_size > 1 else lambda x: x
         self.add_bias = lambda x: x if self.bias is None else lambda x: x + self.bias
         self.linear = get_linear(self.weight, x_shape)
 
     def data_reduce(self, x):
-        dist.all_reduce(x)
+        dist.all_reduce(x, group=self.group)
         return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.add_bias(self.data_reduce(self.linear(x, self.weight)))
 
 
 class MLA(nn.Module):
-    def __init__(self, args: ModelArgs, layer_id: int = 0):
+    def __init__(self, args, layer_id=0, group=None):
+        self.group_size = dist.get_world_size(group=group) if dist.is_initialized() else 1
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads
-        self.n_local_heads = args.n_heads // world_size
+        self.n_local_heads = args.n_heads // self.group_size
         self.q_lora_rank = args.q_lora_rank
         self.kv_lora_rank = args.kv_lora_rank
         self.qk_nope_head_dim = args.qk_nope_head_dim
@@ -89,19 +95,18 @@ class MLA(nn.Module):
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.v_head_dim = args.v_head_dim
         self.layer_id = layer_id
-
         if self.q_lora_rank == 0:
-            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)
+            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim, group=group)
             self.q_linear = lambda x: self.wq(x)
         else:
             self.wq_a = Linear(self.dim, self.q_lora_rank, x_shape="NCL")
             self.q_norm = RMSNorm(self.q_lora_rank)
-            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim, x_shape="NCL")
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim, x_shape="NCL", group=group)
             self.q_linear = lambda x: self.wq_b(self.q_norm(self.wq_a(x)))
         self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim, x_shape="NCL")
         self.kv_norm = RMSNorm(self.kv_lora_rank)
-        self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim), x_shape="NCL")
-        self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim, x_shape="NCL")
+        self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim), x_shape="NCL", group=group)
+        self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim, x_shape="NCL", group=group)
         self.softmax_scale = self.qk_head_dim ** -0.5
         if args.max_seq_len > args.original_seq_len:
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
@@ -158,7 +163,7 @@ class MLA(nn.Module):
         x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         return x
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask_func):
+    def forward(self, x, start_pos, freqs_cis, mask_func):
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
         q = self.q_linear(x)
@@ -177,18 +182,18 @@ class MLA(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim: int, inter_dim: int, x_shape: str="ND"):
+    def __init__(self, dim, inter_dim, x_shape="ND", group=None):
         super().__init__()
-        self.w1 = ColumnParallelLinear(dim, inter_dim, x_shape=x_shape)
-        self.w2 = RowParallelLinear(inter_dim, dim, x_shape=x_shape)
-        self.w3 = ColumnParallelLinear(dim, inter_dim, x_shape=x_shape)
+        self.w1 = ColumnParallelLinear(dim, inter_dim, x_shape=x_shape, group=group)
+        self.w2 = RowParallelLinear(inter_dim, dim, x_shape=x_shape, group=group)
+        self.w3 = ColumnParallelLinear(dim, inter_dim, x_shape=x_shape, group=group)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
 class Gate(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args):
         super().__init__()
         self.dim = args.dim
         self.topk = args.n_activated_experts
@@ -223,7 +228,7 @@ class Gate(nn.Module):
         scores = (scores * mask.unsqueeze(-1)).flatten(1)
         return scores
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x):
         scores = self.get_score(self.linear(x, self.weight))
         original_scores = scores
         scores = self.add_bias(scores)
@@ -236,42 +241,43 @@ class Gate(nn.Module):
 
 
 class Expert(nn.Module):
-    def __init__(self, dim: int, inter_dim: int, layer_id: int = 0, expert_id: int = 0):
+    def __init__(self, dim, inter_dim):
         super().__init__()
         self.w1 = Linear(dim, inter_dim)
         self.w2 = Linear(inter_dim, dim)
         self.w3 = Linear(dim, inter_dim)
-        self.expert_id = expert_id
-        self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
 class MoE(nn.Module):
-    def __init__(self, args: ModelArgs, device: str, layer_id: int = 0):
+    def __init__(self, args, device, layer_id=0, group=None):
+        self.group = group
+        self.local_rank = dist.get_rank(group=group) if dist.is_initialized() else 0
+        self.group_size = dist.get_world_size(group=group) if dist.is_initialized() else 1
         super().__init__()
         self.device = device
         self.dim = args.dim
         self.layer_id = layer_id
-        assert args.n_routed_experts % world_size == 0
+        assert args.n_routed_experts % self.group_size == 0
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts // world_size
+        self.n_local_experts = args.n_routed_experts // self.group_size
         self.n_activated_experts = args.n_activated_experts
-        self.experts_start_idx = rank * self.n_local_experts
+        self.experts_start_idx = self.local_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList([
-            Expert(args.dim, args.moe_inter_dim, layer_id, i).to("cpu" if args.offload_cpu else device)
+            Expert(args.dim, args.moe_inter_dim).to("cpu" if args.offload_cpu else device)
             if self.experts_start_idx <= i < self.experts_end_idx else None
             for i in range(self.n_routed_experts)
         ])
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
-        self.data_reduce = self.data_reduce if world_size > 1 else lambda x: x
+        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim, group=group)
+        self.data_reduce = self.data_reduce if self.group_size > 1 else lambda x: x
         self.calc = self.calc_in_cpu if args.offload_cpu else self.calc_in_xpu
 
     def data_reduce(self, x):
-        dist.all_reduce(x)
+        dist.all_reduce(x, group=self.group)
         return x
 
     def calc_in_cpu(self, x, y, idx, expert, weights):
@@ -284,7 +290,7 @@ class MoE(nn.Module):
         y[idx] += expert(x[idx]) * weights
         return y
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         shape = x.size()
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x)
@@ -302,28 +308,29 @@ class MoE(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs, device: str):
+    def __init__(self, layer_id, args, device, group=None):
         super().__init__()
         self.device = device
-        self.attn = MLA(args, layer_id)
-        self.ffn = MLP(args.dim, args.inter_dim, x_shape="NCL") if layer_id < args.n_dense_layers else MoE(args, device, layer_id)
+        self.attn = MLA(args, layer_id, group)
+        self.ffn = MLP(args.dim, args.inter_dim, "NCL", group) if layer_id < args.n_dense_layers else MoE(args, device, layer_id, group)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask_func) -> torch.Tensor:
+    def forward(self, x, start_pos, freqs_cis, mask_func):
         x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask_func)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
 
 class Transformer(nn.Module):
-    def __init__(self, args: ModelArgs, device: str, tp_group, pp_stage, pp_layers):
-        self.pp_stage_num = 0
+    def __init__(self, args, device, tp_group, pp_stage, pp_layers):
         self.tp_group = tp_group
         self.pp_stage = pp_stage
-        global world_size, rank
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
+        self.pp_stage_num = len(pp_layers)
+        self.local_size = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
+        self.local_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
+        self.global_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.global_rank = dist.get_rank() if dist.is_initialized() else 0
         self.args = args
         self.device = device
         if args.dtype == "fp8":
@@ -337,32 +344,62 @@ class Transformer(nn.Module):
         set_linear_args(args.gemm_impl, args.fp8_quant_block_size, args.offload_cpu)
         super().__init__()
         self.max_seq_len = args.max_seq_len
-        self.embed = ParallelEmbedding(args.vocab_size, args.dim)
+        assert self.pp_stage_num == 0 or sum(pp_layers) == args.n_layers
+        assert self.pp_stage_num == 0 or self.pp_stage < self.pp_stage_num
         self.layers = torch.nn.ModuleList()
+        if self.pp_stage_num > 0 and self.pp_stage == 0:
+            self.embed = ParallelEmbedding(args.vocab_size, args.dim, self.tp_group)
+        self.start_layer_id = sum(pp_layers[:pp_stage]) if self.pp_stage_num > 0 else 0
+        self.end_layer_id = self.start_layer_id + (pp_layers[pp_stage] if self.pp_stage_num > 0 else args.n_layers)
         for layer_id in range(args.n_layers):
-            self.layers.append(Block(layer_id, args, self.device))
-        self.norm = RMSNorm(args.dim)
-        self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
+            if self.start_layer_id <= layer_id < self.end_layer_id:
+                self.layers.append(Block(layer_id, self.args, self.device, self.tp_group))
+            else:
+                self.layers.append(torch.nn.Identity())
+        if self.pp_stage_num > 0 and self.pp_stage == self.pp_stage_num - 1:
+            self.norm = RMSNorm(args.dim)
+            self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype(), group=self.tp_group)
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
-        self.gather_logits = self.gather_logits if world_size > 1 else lambda x: x
+        self.gather_logits = self.gather_logits if self.local_size > 1 else lambda x: x
+        self.recv_h = self.recv_h_remote if self.pp_stage_num > 0 and self.pp_stage != 0 else self.recv_h_local
+        self.send_h = self.send_h_remote if self.pp_stage_num > 0 and self.pp_stage != self.pp_stage_num - 1 else self.send_h_local
+        self.dst_rank = (self.pp_stage + 1) * self.local_size + (self.global_rank % self.local_size)
+        self.src_rank = (self.pp_stage - 1) * self.local_size + (self.global_rank % self.local_size)
 
     def gather_logits(self, logits):
-        all_logits = [torch.empty_like(logits) for _ in range(world_size)]
-        dist.all_gather(all_logits, logits)
+        all_logits = [torch.empty_like(logits) for _ in range(self.local_size)]
+        dist.all_gather(all_logits, logits, group=self.tp_group)
         return torch.cat(all_logits, dim=-1)
 
-    @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
-        seqlen = tokens.size(1)
+    def recv_h_local(self, tokens):
         h = self.embed(tokens)
-        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+        return h
+
+    def recv_h_remote(self, tokens):
+        batch_size, seqlen = tokens.shape
+        h = torch.zeros(batch_size, seqlen, self.args.dim, device=self.device)
+        dist.recv(h, src=self.src_rank)
+        return h
+
+    def send_h_local(self, h):
+        h = self.norm(h)[:, -1]
+        logits = self.gather_logits(self.head(h))
+        return logits
+
+    def send_h_remote(self, h):
+        dist.send(h, dst=self.dst_rank)
+        return None
+
+    @torch.inference_mode()
+    def forward(self, tokens, start_pos=0):
+        seqlen = tokens.size(1)
+        freqs_cis = self.freqs_cis[start_pos: start_pos + seqlen]
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
             mask_func = lambda x: x + mask.unsqueeze(1)
         else:
             mask_func = lambda x: x
-        for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask_func)
-        h = self.norm(h)[:, -1]
-        logits = self.gather_logits(self.head(h))
-        return logits
+        h = self.recv_h(tokens)
+        for layer_id in range(self.start_layer_id, self.end_layer_id):
+            h = self.layers[layer_id](h, start_pos, freqs_cis, mask_func)
+        return self.send_h(h)

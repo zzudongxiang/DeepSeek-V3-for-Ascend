@@ -40,10 +40,13 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
             ttft_flag = False
             ttft = datetime.now() - t0
             t0 = datetime.now()
-        if model.args.temperature > 0:
+        if logits is None:
+            next_token = torch.zeros(1, dtype=torch.long, device=model.device)
+        elif model.args.temperature > 0:
             next_token = sample(logits, model.args.temperature)
         else:
             next_token = logits.argmax(dim=-1)
+        dist.broadcast(next_token, 7)
         next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)

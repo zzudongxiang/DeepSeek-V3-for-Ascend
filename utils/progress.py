@@ -11,6 +11,14 @@ class ThreadTokens:
     thread: threading.Thread
     stop_event: threading.Event
 
+def format_digit(digit):
+    if digit < 10:
+        return f"{digit:05.03f}"
+    elif 10 <= digit < 100:
+        return f"{digit:05.02f}"
+    else:
+        return f"{digit:05.01f}"
+
 def print_progress(stop_event, read_progress_func, description="", interval=10):
     t0 = datetime.now()
     now = datetime(1970, 1, 1)
@@ -20,10 +28,11 @@ def print_progress(stop_event, read_progress_func, description="", interval=10):
             elapsed = (datetime.now() - t0).total_seconds()
             progress = read_progress_func()
             progress = progress if progress < 1 else 1
+            progress = progress if progress < 0.9999 else 0.9999
             if progress > 0:
                 eta = (elapsed / progress) * (1 - progress)
                 eta = eta if eta < 360060 else 360060
-                log_rank0(f"{description}: {(progress * 100):05.02f}% | "
+                log_rank0(f"{description}: {format_digit(progress * 100)}% | "
                             f"Elapsed: {format_time(elapsed)} | "
                             f"ETA: {format_time(eta)}")
             else:

@@ -1,50 +1,22 @@
 #!/bin/python
 
 import os
-import json
 import torch
+import torch_npu
 import importlib
 from datetime import datetime
 import torch.distributed as dist
-from safetensors import safe_open
-from utils.logger import log_rank0
+import mindspeed.megatron_adaptor
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
+from utils.logger import log_last_rank
 from utils.generate import batch_generate
-from model.deepseek.args import ModelArgs
-from utils.progress import start_progress, stop_progress
+from model.deepseek.args import get_model_args
+from utils.load_model import load_model_weight
+from utils.startup.offline import run as offline_run
+from utils.startup.interactive import run as interactive_run
 
-try:
-    import torch_npu
-    import mindspeed.megatron_adaptor
-    default_device = "npu"
-except:
-    default_device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[{datetime.now()}] torch_npu not found, use torch instead")
-
-
-def load_model_weight(model, ckpt_path):
-    progress_value = 0
-    ckpt_file_path = os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors")
-    thread_tokens = start_progress(lambda: progress_value,
-                                   description="Load Model Weight",
-                                   interval=30)
-    model_state_dict = model.state_dict()
-    with safe_open(ckpt_file_path, framework="pt") as f:
-        load_index = 0
-        total_num = len(f.keys())
-        for k in model_state_dict:
-            assert k in f.keys(), k
-            model_state_dict[k].copy_(f.get_tensor(k))
-            progress_value = load_index / total_num
-            load_index += 1
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        dist.barrier()
-    stop_progress(thread_tokens)
-    hbm = torch.cuda.memory_cached() / 1024.0 / 1024.0 / 1024.0
-    log_rank0(f"{hbm:.2f}GB Memory in Used")
-
-def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup_type: str = "online") -> None:
+def main(ckpt_path, config, model_args, model_name, startup_type="online", pp_layer_list=None):
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(local_rank)
     torch.set_default_device("npu")
@@ -60,43 +32,29 @@ def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup
     module_spec.loader.exec_module(module)
 
     # 构建模型
-    with open(config) as f:
-        args = ModelArgs(**json.load(f))
-    args_index = 0
-    while args_index < len(model_args):
-        arg = model_args[args_index].replace("--", "")
-        if "=" in arg:
-            key = arg.split("=")[0].replace("-", "_")
-            value = "=".join(arg.split("=")[1:])
-            args_index += 1
-        else:
-            key = arg.replace("-", "_")
-            if args_index < len(model_args) - 1:
-                value = model_args[args_index + 1]
-                args_index += 2
-            else:
-                args_index += 1
-                continue
-        if hasattr(args, key):
-            setattr(args, key, value)
-        else:
-            log_rank0(f"Unknow args: {key} = {value}")
-    log_rank0(args)
-
-    with torch.device(default_device):
-        model = module.Transformer(args, default_device)
-        # model = torch.compile(model)
+    args = get_model_args(config, model_args)
+    pp_layers = [args.n_layers] if pp_layer_list is None else [int(num) for num in pp_layer_list.split(',')]
+    num_stages = len(pp_layers)
+    assert world_size % num_stages == 0
+    pp_group_size = world_size // num_stages
+    pp_stage = rank // pp_group_size
+    tp_group_ranks = [pp_stage * pp_group_size + i for i in range(pp_group_size)]
+    tp_group = dist.new_group(tp_group_ranks, use_local_synchronization=True)
+    with torch.device("npu"):
+        model = module.Transformer(args, "npu", tp_group, pp_stage, pp_layers)
 
     # 模型预热
     t0 = datetime.now()
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    tokenizer.decode(batch_generate(model, [tokenizer.encode("DeepSeek")], tokenizer.eos_token_id, warmup=True)[0])
+    completion_tokens = batch_generate(model, [tokenizer.encode("DeepSeek")], tokenizer.eos_token_id, warmup=True)
+    if model.pp_stage_num == 0 or model.pp_stage == model.pp_stage_num - 1:
+        tokenizer.decode(completion_tokens[0])
     dur = (datetime.now() - t0).total_seconds()
-    log_rank0(f"Prepare DeepSeek Model in {dur:.2f} sec")
+    log_last_rank(f"Prepare DeepSeek Model in {dur:.2f} sec")
 
     # 加载模型权重
     if not args.use_random_weights:
-        load_model_weight(model, ckpt_path)
+        load_model_weight(model, ckpt_path, tp_group)
 
     # 按照启动类型启动对应的实例
     if startup_type == "online":
@@ -109,11 +67,10 @@ def main(ckpt_path: str, config: str, model_args: list, model_name: str, startup
         else:
             run_slaver(model, tokenizer, service_port)
     elif startup_type == "interactive":
-        from utils.startup.interactive import run
-        run(model, tokenizer)
+        pass
+        interactive_run(model, tokenizer)
     elif os.path.exists(startup_type):
-        from utils.startup.offline import run
-        run(model, tokenizer, startup_type)
+        offline_run(model, tokenizer, startup_type)
     else:
         raise ValueError(f"Unknown startup type: {startup_type}")
 
@@ -123,6 +80,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--config-path", type=str, required=True)
     parser.add_argument("--startup-type", type=str, required=True)
+    parser.add_argument("--pp-layer-list", type=str, default=None)
     args, model_args = parser.parse_known_args()
 
     rank = int(os.getenv("RANK", "0"))
@@ -131,7 +89,7 @@ if __name__ == "__main__":
     if world_size > 1 and not dist.is_initialized():
         dist.init_process_group("nccl")
     try:
-        main(args.ckpt_path, args.config_path, model_args, args.model_name, args.startup_type)
+        main(args.ckpt_path, args.config_path, model_args, args.model_name, args.startup_type, args.pp_layer_list)
     except Exception as e:
         raise e
     finally:
