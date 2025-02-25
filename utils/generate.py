@@ -20,7 +20,6 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
     thread_tokens = start_progress(lambda: generate_progress,
                                    reset_generate_progress,
                                    description="Generate Progress")
-
     max_new_tokens = 2 if warmup else model.args.max_new_tokens
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len
@@ -41,7 +40,7 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
             ttft = datetime.now() - t0
             t0 = datetime.now()
         if logits is None:
-            next_token = torch.zeros(1, dtype=torch.long, device=model.device)
+            next_token = torch.zeros(tokens.shape[0], dtype=torch.long, device=model.device)
         elif model.args.temperature > 0:
             next_token = sample(logits, model.args.temperature)
         else:

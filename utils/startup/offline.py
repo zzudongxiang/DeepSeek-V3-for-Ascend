@@ -9,8 +9,8 @@ def run(model, tokenizer, file_path):
         prompts = prompts[:model.args.max_batch_size]
     prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
     completion_tokens = batch_generate(model, prompt_tokens, tokenizer.eos_token_id)
-    completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
     if dist.is_initialized() and dist.get_rank() == dist.get_world_size() - 1:
+        completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             log(f"Prompt >>>\n{prompt}")
             log(f"Completion >>>\n{completion}")
