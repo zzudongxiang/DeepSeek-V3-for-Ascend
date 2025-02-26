@@ -117,21 +117,23 @@ class MLA(nn.Module):
             self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
             self.get_score_part1 = self.get_naive_score_part1
             self.get_score_part2 = self.get_naive_score_part2
-            self.get_wkv_b_weight = lambda: self.wkv_b.weight
         else:
             self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
             self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
             self.get_score_part1 = self.get_absorb_score_part1
             self.get_score_part2 = self.get_absorb_score_part2
-            # TODO: 这里的wkv可以提前计算并储存，但是储存所需的显存容量较大
+        self.update_wkv_b_cache()
+
+    def update_wkv_b_cache(self):
+        if self.args.attn_impl == "absorb":
             if self.wkv_b.weight.dtype == torch.bfloat16:
-                self.get_wkv_b_weight = lambda: self.wkv_b.weight
+                self.get_wkv_b_weight = self.wkv_b.weight
             elif self.wkv_b.weight.dtype == torch.float8_e4m3fn:
-                self.get_wkv_b_weight = lambda: fp8_dequant(self.wkv_b.weight, self.wkv_b.scale)
+                self.get_wkv_b_weight = fp8_dequant(self.wkv_b.weight, self.wkv_b.scale)
             elif self.wkv_b.weight.dtype == torch.int8:
-                self.get_wkv_b_weight = lambda: int8_dequant(self.wkv_b.weight, self.wkv_b.scale).T
+                self.get_wkv_b_weight = int8_dequant(self.wkv_b.weight, self.wkv_b.scale).T
             elif self.wkv_b.weight.dtype == torch.int32:
-                self.get_wkv_b_weight = lambda: int4_dequant(self.wkv_b.weight, self.wkv_b.scale).T
+                self.get_wkv_b_weight = int4_dequant(self.wkv_b.weight, self.wkv_b.scale).T
             else:
                 raise NotImplementedError(f"Unsupported dtype: {self.wkv_b.weight.dtype}")
 
@@ -149,7 +151,7 @@ class MLA(nn.Module):
         return scores, q, q_nope, kv, None
 
     def get_absorb_score_part1(self, kv, q_nope, q_pe, k_pe, bsz, seqlen, bsz_index, start_pos, end_pos):
-        wkv_b = self.get_wkv_b_weight()
+        wkv_b = self.get_wkv_b_weight
         wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
         q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
         bsz_start_index = bsz_index * self.args.mini_batch_size
@@ -401,6 +403,10 @@ class Transformer(nn.Module):
     def send_h_remote(self, h):
         dist.send(h, dst=self.dst_rank)
         return None
+
+    def update_wkv_b_cache(self):
+        for layer_id in range(self.start_layer_id, self.end_layer_id):
+            self.layers[layer_id].attn.update_wkv_b_cache()
 
     @torch.inference_mode()
     def forward(self, tokens, bsz_index=0, start_pos=0):

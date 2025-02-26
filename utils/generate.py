@@ -37,23 +37,32 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
         global_bsz = tokens.shape[0]
         generate_progress = cur_pos / total_len
         recv_next_token = torch.zeros(global_bsz, dtype=torch.long, device=model.device)
-        if ttft_flag:
-            ttft_flag = False
-            ttft = datetime.now() - t0
-            t0 = datetime.now()
-        for i in range(0, global_bsz, model.args.mini_batch_size):
-            logits = model.forward(tokens[i: i + model.args.mini_batch_size, prev_pos:cur_pos],
-                                   bsz_index=i // model.args.mini_batch_size,
+        mini_batch_size = model.args.mini_batch_size if model.pp_stage_num > 1 else global_bsz
+        for i in range(0, global_bsz, mini_batch_size):
+            logits = model.forward(tokens[i: i + mini_batch_size, prev_pos:cur_pos],
+                                   bsz_index=i // mini_batch_size,
                                    start_pos=prev_pos)
-            if logits is not None and model.args.temperature > 0:
-                next_token = sample(logits, model.args.temperature)
-            elif logits is not None:
-                next_token = logits.argmax(dim=-1)
-            if model.pp_stage_num > 1 and model.pp_stage == 0:
-                recv_handles.append(dist.irecv(recv_next_token[i: i + model.args.mini_batch_size], src=model.src_rank))
-            elif model.pp_stage_num > 1 and model.pp_stage == model.pp_stage_num - 1:
-                dist.isend(next_token, dst=model.dst_rank)
-                recv_next_token[i: i + model.args.mini_batch_size] = next_token
+            if logits is not None:
+                if model.args.temperature > 0:
+                    next_token = sample(logits, model.args.temperature)
+                else:
+                    next_token = logits.argmax(dim=-1)
+            if model.pp_stage_num > 1:
+                if model.pp_stage == 0:
+                    recv_handles.append(dist.irecv(recv_next_token[i: i + mini_batch_size], src=model.src_rank))
+                elif model.pp_stage_num > 1 and model.pp_stage == model.pp_stage_num - 1:
+                    dist.isend(next_token, dst=model.dst_rank)
+                    recv_next_token[i: i + mini_batch_size] = next_token
+                    if ttft_flag:
+                        ttft_flag = False
+                        ttft = datetime.now() - t0
+                        t0 = datetime.now()
+            else:
+                recv_next_token[i: i + mini_batch_size] = next_token
+                if ttft_flag:
+                    ttft_flag = False
+                    ttft = datetime.now() - t0
+                    t0 = datetime.now()
         for handle in recv_handles:
             if not handle.is_completed():
                 handle.wait()

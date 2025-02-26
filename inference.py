@@ -55,6 +55,7 @@ def main(ckpt_path, config, model_args, model_name, startup_type="online", pp_la
     # 加载模型权重
     if not args.use_random_weights:
         load_model_weight(model, ckpt_path, tp_group)
+    model.update_wkv_b_cache()
 
     # 按照启动类型启动对应的实例
     if startup_type == "online":
