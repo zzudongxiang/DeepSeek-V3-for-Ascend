@@ -9,3 +9,6 @@ kernel_meta/
 extra-info/
 ckpt-saved/
 dump/
+
+*.log
+*.tar.gz

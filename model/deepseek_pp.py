@@ -344,27 +344,29 @@ class Transformer(nn.Module):
         set_linear_args(args.gemm_impl, args.fp8_quant_block_size, args.offload_cpu)
         super().__init__()
         self.max_seq_len = args.max_seq_len
-        assert self.pp_stage_num == 0 or sum(pp_layers) == args.n_layers
-        assert self.pp_stage_num == 0 or self.pp_stage < self.pp_stage_num
+        assert self.pp_stage_num <= 1 or sum(pp_layers) == args.n_layers
+        assert self.pp_stage_num <= 1 or self.pp_stage < self.pp_stage_num
         self.layers = torch.nn.ModuleList()
-        if self.pp_stage_num > 0 and self.pp_stage == 0:
+        if self.pp_stage_num > 1 and self.pp_stage == 0:
             self.embed = ParallelEmbedding(args.vocab_size, args.dim, self.tp_group)
-        self.start_layer_id = sum(pp_layers[:pp_stage]) if self.pp_stage_num > 0 else 0
-        self.end_layer_id = self.start_layer_id + (pp_layers[pp_stage] if self.pp_stage_num > 0 else args.n_layers)
+        self.start_layer_id = sum(pp_layers[:pp_stage]) if self.pp_stage_num > 1 else 0
+        self.end_layer_id = self.start_layer_id + (pp_layers[pp_stage] if self.pp_stage_num > 1 else args.n_layers)
         for layer_id in range(args.n_layers):
             if self.start_layer_id <= layer_id < self.end_layer_id:
                 self.layers.append(Block(layer_id, self.args, self.device, self.tp_group))
             else:
                 self.layers.append(torch.nn.Identity())
-        if self.pp_stage_num > 0 and self.pp_stage == self.pp_stage_num - 1:
+        if self.pp_stage_num > 1 and self.pp_stage == self.pp_stage_num - 1:
             self.norm = RMSNorm(args.dim)
             self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype(), group=self.tp_group)
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.gather_logits = self.gather_logits if self.local_size > 1 else lambda x: x
-        self.recv_h = self.recv_h_remote if self.pp_stage_num > 0 and self.pp_stage != 0 else self.recv_h_local
-        self.send_h = self.send_h_remote if self.pp_stage_num > 0 and self.pp_stage != self.pp_stage_num - 1 else self.send_h_local
+        self.recv_h = self.recv_h_remote if self.pp_stage_num > 1 and self.pp_stage != 0 else self.recv_h_local
+        self.send_h = self.send_h_remote if self.pp_stage_num > 1 and self.pp_stage != self.pp_stage_num - 1 else self.send_h_local
         self.dst_rank = (self.pp_stage + 1) * self.local_size + (self.global_rank % self.local_size)
         self.src_rank = (self.pp_stage - 1) * self.local_size + (self.global_rank % self.local_size)
+        self.dst_rank = self.dst_rank if self.dst_rank < self.global_size else self.dst_rank - self.global_size
+        self.src_rank = self.global_size + self.src_rank if self.src_rank < 0 else self.src_rank
 
     def gather_logits(self, logits):
         all_logits = [torch.empty_like(logits) for _ in range(self.local_size)]

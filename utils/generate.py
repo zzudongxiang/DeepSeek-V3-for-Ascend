@@ -1,4 +1,5 @@
 import torch
+import threading
 from typing import List
 from datetime import datetime
 import torch.distributed as dist
@@ -45,7 +46,10 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
             next_token = sample(logits, model.args.temperature)
         else:
             next_token = logits.argmax(dim=-1)
-        dist.broadcast(next_token, 7)
+        if model.pp_stage_num > 1 and model.pp_stage == 0:
+            dist.recv(next_token, src=model.src_rank)
+        elif model.pp_stage_num > 1 and model.pp_stage == model.pp_stage_num - 1:
+            dist.send(next_token, dst=model.dst_rank)
         next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
