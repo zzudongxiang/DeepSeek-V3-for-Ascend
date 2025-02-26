@@ -85,6 +85,7 @@ class MLA(nn.Module):
     def __init__(self, args, layer_id=0, group=None):
         self.group_size = dist.get_world_size(group=group) if dist.is_initialized() else 1
         super().__init__()
+        self.args = args
         self.dim = args.dim
         self.n_heads = args.n_heads
         self.n_local_heads = args.n_heads // self.group_size
@@ -134,36 +135,44 @@ class MLA(nn.Module):
             else:
                 raise NotImplementedError(f"Unsupported dtype: {self.wkv_b.weight.dtype}")
 
-    def get_naive_score_part1(self, kv, q_nope, q_pe, k_pe, bsz, seqlen, start_pos, end_pos):
+    def get_naive_score_part1(self, kv, q_nope, q_pe, k_pe, bsz, seqlen, bsz_index, start_pos, end_pos):
         q = torch.cat([q_nope, q_pe], dim=-1)
         kv = self.wkv_b(self.kv_norm(kv))
         kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
-        self.k_cache[:bsz, start_pos:end_pos] = k
-        self.v_cache[:bsz, start_pos:end_pos] = v
-        scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+        bsz_start_index = bsz_index * self.args.mini_batch_size
+        bsz_end_index = bsz_start_index + bsz
+        self.k_cache[bsz_start_index: bsz_end_index, start_pos:end_pos] = k
+        self.v_cache[bsz_start_index: bsz_end_index, start_pos:end_pos] = v
+        scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[bsz_start_index: bsz_end_index, :end_pos]) * self.softmax_scale
         return scores, q, q_nope, kv, None
 
-    def get_absorb_score_part1(self, kv, q_nope, q_pe, k_pe, bsz, seqlen, start_pos, end_pos):
+    def get_absorb_score_part1(self, kv, q_nope, q_pe, k_pe, bsz, seqlen, bsz_index, start_pos, end_pos):
         wkv_b = self.get_wkv_b_weight()
         wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
         q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-        self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
-        self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
-        scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
-                  torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
+        bsz_start_index = bsz_index * self.args.mini_batch_size
+        bsz_end_index = bsz_start_index + bsz
+        self.kv_cache[bsz_start_index: bsz_end_index, start_pos:end_pos] = self.kv_norm(kv)
+        self.pe_cache[bsz_start_index: bsz_end_index, start_pos:end_pos] = k_pe.squeeze(2)
+        scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[bsz_start_index: bsz_end_index, :end_pos]) +
+                  torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[bsz_start_index: bsz_end_index, :end_pos])) * self.softmax_scale
         return scores, None, q_nope, kv, wkv_b
 
-    def get_naive_score_part2(self, scores, wkv_b, bsz, end_pos):
-        return torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
+    def get_naive_score_part2(self, scores, wkv_b, bsz, bsz_index, end_pos):
+        bsz_start_index = bsz_index * self.args.mini_batch_size
+        bsz_end_index = bsz_start_index + bsz
+        return torch.einsum("bsht,bthd->bshd", scores, self.v_cache[bsz_start_index: bsz_end_index, :end_pos])
 
-    def get_absorb_score_part2(self, scores, wkv_b, bsz, end_pos):
-        x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+    def get_absorb_score_part2(self, scores, wkv_b, bsz, bsz_index, end_pos):
+        bsz_start_index = bsz_index * self.args.mini_batch_size
+        bsz_end_index = bsz_start_index + bsz
+        x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[bsz_start_index: bsz_end_index, :end_pos])
         x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         return x
 
-    def forward(self, x, start_pos, freqs_cis, mask_func):
+    def forward(self, x, bsz_index, start_pos, freqs_cis, mask_func):
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
         q = self.q_linear(x)
@@ -173,10 +182,10 @@ class MLA(nn.Module):
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
-        scores, q, q_nope, kv, wkv_b = self.get_score_part1(kv, q_nope, q_pe, k_pe, bsz, seqlen, start_pos, end_pos)
+        scores, q, q_nope, kv, wkv_b = self.get_score_part1(kv, q_nope, q_pe, k_pe, bsz, seqlen, bsz_index, start_pos, end_pos)
         scores = mask_func(scores)
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
-        x = self.get_score_part2(scores, wkv_b, bsz, end_pos)
+        x = self.get_score_part2(scores, wkv_b, bsz, bsz_index, end_pos)
         x = self.wo(x.flatten(2))
         return x
 
@@ -316,8 +325,8 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
-    def forward(self, x, start_pos, freqs_cis, mask_func):
-        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask_func)
+    def forward(self, x, bsz_index, start_pos, freqs_cis, mask_func):
+        x = x + self.attn(self.attn_norm(x), bsz_index, start_pos, freqs_cis, mask_func)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
@@ -344,6 +353,7 @@ class Transformer(nn.Module):
         set_linear_args(args.gemm_impl, args.fp8_quant_block_size, args.offload_cpu)
         super().__init__()
         self.max_seq_len = args.max_seq_len
+        assert args.max_batch_size % args.mini_batch_size == 0
         assert self.pp_stage_num <= 1 or sum(pp_layers) == args.n_layers
         assert self.pp_stage_num <= 1 or self.pp_stage < self.pp_stage_num
         self.layers = torch.nn.ModuleList()
@@ -393,7 +403,7 @@ class Transformer(nn.Module):
         return None
 
     @torch.inference_mode()
-    def forward(self, tokens, start_pos=0):
+    def forward(self, tokens, bsz_index=0, start_pos=0):
         seqlen = tokens.size(1)
         freqs_cis = self.freqs_cis[start_pos: start_pos + seqlen]
         if seqlen > 1:
@@ -403,5 +413,5 @@ class Transformer(nn.Module):
             mask_func = lambda x: x
         h = self.recv_h(tokens)
         for layer_id in range(self.start_layer_id, self.end_layer_id):
-            h = self.layers[layer_id](h, start_pos, freqs_cis, mask_func)
+            h = self.layers[layer_id](h, bsz_index, start_pos, freqs_cis, mask_func)
         return self.send_h(h)

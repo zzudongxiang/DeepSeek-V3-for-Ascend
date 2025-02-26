@@ -39,6 +39,7 @@ def auto_convert_types(func):
 @dataclass
 class ModelArgs:
     max_batch_size: int = 128
+    mini_batch_size: int = 16
     max_seq_len: int = 2048
     dtype: Literal["bf16", "fp8", "int8", "int4"] = "bf16"
     vocab_size: int = 102400
@@ -96,6 +97,9 @@ def get_model_args(config_path, update_list):
     args_index = 0
     while args_index < len(update_list):
         arg = update_list[args_index].replace("--", "")
+        if len(arg) == 0:
+            args_index += 1
+            continue
         if "=" in arg:
             key = arg.split("=")[0].replace("-", "_")
             value = "=".join(arg.split("=")[1:])
@@ -104,7 +108,11 @@ def get_model_args(config_path, update_list):
             key = arg.replace("-", "_")
             if args_index < len(update_list) - 1:
                 value = update_list[args_index + 1]
-                args_index += 2
+                if "--" not in value:
+                    args_index += 2
+                else:
+                    args_index += 1
+                    continue
             else:
                 args_index += 1
                 continue
@@ -112,5 +120,7 @@ def get_model_args(config_path, update_list):
             setattr(args, key, value)
         else:
             log_rank0(f"Unknow args: {key} = {value}")
+    args.mini_batch_size = args.mini_batch_size if args.mini_batch_size > 0 else 1
+    args.mini_batch_size = args.mini_batch_size if args.mini_batch_size < args.max_batch_size else args.max_batch_size
     log_rank0(args)
     return args

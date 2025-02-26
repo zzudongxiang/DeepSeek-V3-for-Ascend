@@ -1,5 +1,4 @@
 import torch
-import threading
 from typing import List
 from datetime import datetime
 import torch.distributed as dist
@@ -34,23 +33,31 @@ def batch_generate(model, prompt_tokens, eos_id, warmup=False) -> List[List[int]
     ttft_flag = True
     t0 = datetime.now()
     for cur_pos in range(min(prompt_lens), total_len):
+        recv_handles = []
+        global_bsz = tokens.shape[0]
         generate_progress = cur_pos / total_len
-        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        recv_next_token = torch.zeros(global_bsz, dtype=torch.long, device=model.device)
         if ttft_flag:
             ttft_flag = False
             ttft = datetime.now() - t0
             t0 = datetime.now()
-        if logits is None:
-            next_token = torch.zeros(tokens.shape[0], dtype=torch.long, device=model.device)
-        elif model.args.temperature > 0:
-            next_token = sample(logits, model.args.temperature)
-        else:
-            next_token = logits.argmax(dim=-1)
-        if model.pp_stage_num > 1 and model.pp_stage == 0:
-            dist.recv(next_token, src=model.src_rank)
-        elif model.pp_stage_num > 1 and model.pp_stage == model.pp_stage_num - 1:
-            dist.send(next_token, dst=model.dst_rank)
-        next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+        for i in range(0, global_bsz, model.args.mini_batch_size):
+            logits = model.forward(tokens[i: i + model.args.mini_batch_size, prev_pos:cur_pos],
+                                   bsz_index=i // model.args.mini_batch_size,
+                                   start_pos=prev_pos)
+            if logits is not None and model.args.temperature > 0:
+                next_token = sample(logits, model.args.temperature)
+            elif logits is not None:
+                next_token = logits.argmax(dim=-1)
+            if model.pp_stage_num > 1 and model.pp_stage == 0:
+                recv_handles.append(dist.irecv(recv_next_token[i: i + model.args.mini_batch_size], src=model.src_rank))
+            elif model.pp_stage_num > 1 and model.pp_stage == model.pp_stage_num - 1:
+                dist.isend(next_token, dst=model.dst_rank)
+                recv_next_token[i: i + model.args.mini_batch_size] = next_token
+        for handle in recv_handles:
+            if not handle.is_completed():
+                handle.wait()
+        next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], recv_next_token)
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
         prev_pos = cur_pos

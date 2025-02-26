@@ -15,8 +15,8 @@ matplotlib
 # Torch环境依赖的包
 pyyaml
 numpy==1.26.4
-torch==2.1
-torchvision==0.16.0
+torch==2.4.0
+torch_npu==2.4.0
 
 # DeepSeek依赖的包
 transformers==4.46.3

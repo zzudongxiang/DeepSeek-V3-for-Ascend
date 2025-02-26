@@ -352,7 +352,7 @@ class Transformer(nn.Module):
         return torch.cat(all_logits, dim=-1)
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    def forward(self, tokens: torch.Tensor, bsz_index: int = 0, start_pos: int = 0):
         seqlen = tokens.size(1)
         h = self.embed(tokens)
         freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]

@@ -6,10 +6,13 @@ OUT_PUT="log"
 rm -rf ${OUT_PUT} && mkdir -p ${OUT_PUT}
 
 ARGS="
-    --ckpt-path ../ckpt/v3-int4-mp8     \
+    --ckpt-path ../ckpt/v3-int4-mp2     \
     --config configs/config_671B.json   \
-    --model-name deepseek_v3            \
+    --model-name deepseek_pp            \
     --startup-type ./scripts/inputs.txt \
+    --pp-layer-list 17,15,15,14         \
+    --max-batch-size 1                  \
+    --max-new-tokens 10                 \
 "
 
 msprof --application="bash scripts/inference.sh ${ARGS}" \
