@@ -334,10 +334,10 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, args, device, tp_group, pp_stage, pp_layers):
+    def __init__(self, args, device, tp_group, pp_stage):
         self.tp_group = tp_group
         self.pp_stage = pp_stage
-        self.pp_stage_num = len(pp_layers)
+        self.pp_stage_num = 1 if args.pp_layer_list is None else len(args.pp_layer_list)
         self.local_size = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
         self.local_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
         self.global_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -356,13 +356,13 @@ class Transformer(nn.Module):
         super().__init__()
         self.max_seq_len = args.max_seq_len
         assert args.max_batch_size % args.mini_batch_size == 0
-        assert self.pp_stage_num <= 1 or sum(pp_layers) == args.n_layers
+        assert self.pp_stage_num <= 1 or sum(args.pp_layer_list) == args.n_layers
         assert self.pp_stage_num <= 1 or self.pp_stage < self.pp_stage_num
         self.layers = torch.nn.ModuleList()
         if self.pp_stage_num > 1 and self.pp_stage == 0:
             self.embed = ParallelEmbedding(args.vocab_size, args.dim, self.tp_group)
-        self.start_layer_id = sum(pp_layers[:pp_stage]) if self.pp_stage_num > 1 else 0
-        self.end_layer_id = self.start_layer_id + (pp_layers[pp_stage] if self.pp_stage_num > 1 else args.n_layers)
+        self.start_layer_id = sum(args.pp_layer_list[:pp_stage]) if self.pp_stage_num > 1 else 0
+        self.end_layer_id = self.start_layer_id + (args.pp_layer_list[pp_stage] if self.pp_stage_num > 1 else args.n_layers)
         for layer_id in range(args.n_layers):
             if self.start_layer_id <= layer_id < self.end_layer_id:
                 self.layers.append(Block(layer_id, self.args, self.device, self.tp_group))

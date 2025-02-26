@@ -320,7 +320,7 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, args: ModelArgs, device: str, tp_group, pp_stage, pp_layers):
+    def __init__(self, args: ModelArgs, device: str, tp_group, pp_stage):
         self.pp_stage_num = 0
         self.tp_group = tp_group
         self.pp_stage = pp_stage

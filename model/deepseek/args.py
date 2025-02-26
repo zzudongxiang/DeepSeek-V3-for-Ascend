@@ -13,6 +13,7 @@ def auto_convert_types(func):
         if name in hints:
             target_type = hints[name]
             origin = get_origin(target_type)
+            args = get_args(target_type)
             if origin is Literal:
                 literal_values = get_args(target_type)
                 if value in literal_values:
@@ -26,9 +27,34 @@ def auto_convert_types(func):
                     return func(obj, name, False)
                 else:
                     raise ValueError(f"Cannot convert '{value}' to bool")
+            elif origin is list and args:
+                element_type = args[0]
+                if value is None:
+                    return func(obj, name, value)
+                elif isinstance(value, str):
+                    split_values = [s.strip() for s in value.split(',')]
+                    converted_list = []
+                    for val in split_values:
+                        try:
+                            converted_val = element_type(val)
+                            converted_list.append(converted_val)
+                        except (ValueError, TypeError):
+                            raise ValueError(f"Element '{val}' cannot be converted to {element_type}")
+                    return func(obj, name, converted_list)
+                elif isinstance(value, list):
+                    converted_list = []
+                    for item in value:
+                        try:
+                            converted_item = element_type(item)
+                            converted_list.append(converted_item)
+                        except (ValueError, TypeError):
+                            raise ValueError(f"Element '{item}' cannot be converted to {element_type}")
+                    return func(obj, name, converted_list)
+                else:
+                    raise TypeError(f"Cannot convert {value} to {target_type}")
             else:
                 try:
-                    converted_value = target_type(value)
+                    converted_value = target_type(value) if value is not None else None
                     return func(obj, name, converted_value)
                 except (ValueError, TypeError):
                     raise TypeError(f"Cannot convert {value} to {target_type}")
@@ -78,6 +104,7 @@ class ModelArgs:
     temperature: float = 0.2
     fp8_quant_block_size: int = 128
     offload_cpu: bool = False
+    pp_layer_list: list[int] = None
 
     @auto_convert_types
     def __setattr__(self, name, value):

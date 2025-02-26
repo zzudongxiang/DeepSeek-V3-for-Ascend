@@ -16,7 +16,7 @@ from utils.load_model import load_model_weight
 from utils.startup.offline import run as offline_run
 from utils.startup.interactive import run as interactive_run
 
-def main(ckpt_path, config, model_args, model_name, startup_type="online", pp_layer_list=None):
+def main(ckpt_path, config, model_args, model_name, startup_type="online"):
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(local_rank)
     torch.set_default_device("npu")
@@ -33,15 +33,14 @@ def main(ckpt_path, config, model_args, model_name, startup_type="online", pp_la
 
     # 构建模型
     args = get_model_args(config, model_args)
-    pp_layers = [args.n_layers] if pp_layer_list is None else [int(num) for num in pp_layer_list.split(',')]
-    num_stages = len(pp_layers)
+    num_stages = len(args.pp_layer_list)
     assert world_size % num_stages == 0
     pp_group_size = world_size // num_stages
     pp_stage = rank // pp_group_size
     tp_group_ranks = [pp_stage * pp_group_size + i for i in range(pp_group_size)]
     tp_group = dist.new_group(tp_group_ranks, use_local_synchronization=True)
     with torch.device("npu"):
-        model = module.Transformer(args, "npu", tp_group, pp_stage, pp_layers)
+        model = module.Transformer(args, "npu", tp_group, pp_stage)
 
     # 模型预热
     t0 = datetime.now()
@@ -81,7 +80,6 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--config-path", type=str, required=True)
     parser.add_argument("--startup-type", type=str, required=True)
-    parser.add_argument("--pp-layer-list", type=str, default=None)
     args, model_args = parser.parse_known_args()
 
     rank = int(os.getenv("RANK", "0"))
@@ -90,7 +88,7 @@ if __name__ == "__main__":
     if world_size > 1 and not dist.is_initialized():
         dist.init_process_group("nccl")
     try:
-        main(args.ckpt_path, args.config_path, model_args, args.model_name, args.startup_type, args.pp_layer_list)
+        main(args.ckpt_path, args.config_path, model_args, args.model_name, args.startup_type)
     except Exception as e:
         raise e
     finally:
