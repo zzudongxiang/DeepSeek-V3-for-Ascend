@@ -19,8 +19,12 @@ except:
 def log(message):
     log_str = f"[{datetime.now()}] {message}\n"
     if log_file is not None:
-        log_file.writelines(log_str)
-        log_file.flush()
+        try:
+            log_file.writelines(log_str)
+            log_file.flush()
+        except:
+            print("Failed to write the log file, will stop writing")
+            log_file = None
     print(log_str[:-1])
 
 def log_last_rank(message):

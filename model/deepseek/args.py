@@ -2,7 +2,7 @@ import json
 import functools
 from typing import Literal
 from dataclasses import dataclass
-from utils.logger import log_rank0
+from utils.tools.logger import log_rank0
 from typing_extensions import get_origin
 from typing import get_type_hints, Literal, get_args
 

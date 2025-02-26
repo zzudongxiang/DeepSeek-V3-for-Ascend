@@ -2,7 +2,7 @@ import os
 import threading
 from datetime import datetime
 from dataclasses import dataclass
-from utils.logger import log_rank0, format_time
+from utils.tools.logger import log_rank0, format_time
 
 rank = int(os.getenv("RANK", "0"))
 

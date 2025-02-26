@@ -9,8 +9,8 @@ import torch.distributed as dist
 import mindspeed.megatron_adaptor
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
-from utils.logger import log_last_rank
 from utils.generate import batch_generate
+from utils.tools.logger import log_last_rank
 from model.deepseek.args import get_model_args
 from utils.load_model import load_model_weight
 from utils.startup.offline import run as offline_run

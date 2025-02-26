@@ -1,5 +1,5 @@
-from utils.logger import log
 import torch.distributed as dist
+from utils.tools.logger import log
 from utils.generate import batch_generate
 
 def run(model, tokenizer, file_path):

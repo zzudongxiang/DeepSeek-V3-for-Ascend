@@ -2,8 +2,8 @@ import os
 import torch
 import torch.distributed as dist
 from safetensors import safe_open
-from utils.logger import log_rank0
-from utils.progress import start_progress, stop_progress
+from utils.tools.logger import log_rank0
+from utils.tools.progress import start_progress, stop_progress
 
 def load_model_weight(model, ckpt_path, tp_group):
     model_state_dict = model.state_dict()

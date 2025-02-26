@@ -2,9 +2,9 @@ import torch
 from typing import List
 from datetime import datetime
 import torch.distributed as dist
-from utils.logger import log_rank0
+from utils.tools.logger import log_rank0
 from utils.sample import sample_cpu as sample
-from utils.progress import start_progress, stop_progress
+from utils.tools.progress import start_progress, stop_progress
 
 generate_progress = 0
 

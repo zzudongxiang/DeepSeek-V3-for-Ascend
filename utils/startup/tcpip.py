@@ -1,7 +1,7 @@
 import json
 import socket
 import threading
-from utils.logger import log
+from utils.tools.logger import log
 
 class Server:
     def __init__(self, host='localhost', port=5001):
