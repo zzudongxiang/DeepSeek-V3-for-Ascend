@@ -17,6 +17,7 @@ except:
     print(f"Unable to write to log file: {log_filename}")
 
 def log(message):
+    global log_file
     log_str = f"[{datetime.now()}] {message}\n"
     if log_file is not None:
         try:

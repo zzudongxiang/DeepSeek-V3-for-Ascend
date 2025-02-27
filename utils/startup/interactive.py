@@ -1,6 +1,6 @@
 import torch.distributed as dist
 from utils.tools.logger import log_rank0
-from utils.generate import batch_generate
+from utils.generate.entry import batch_generate
 
 def run(model, tokenizer):
     messages = []

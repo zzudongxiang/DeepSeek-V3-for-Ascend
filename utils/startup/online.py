@@ -6,8 +6,8 @@ import threading
 from queue import Queue
 from datetime import datetime
 from concurrent.futures import Future
-from utils.generate import batch_generate
 from utils.startup.tcpip import Server, Client
+from utils.generate.entry import batch_generate
 
 app = flask.Flask(__name__)
 

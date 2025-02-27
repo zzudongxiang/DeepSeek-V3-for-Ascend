@@ -9,10 +9,10 @@ import torch.distributed as dist
 import mindspeed.megatron_adaptor
 from argparse import ArgumentParser
 from transformers import AutoTokenizer
-from utils.generate import batch_generate
-from utils.tools.logger import log_last_rank
 from model.deepseek.args import get_model_args
 from utils.load_model import load_model_weight
+from utils.generate.entry import batch_generate
+from utils.tools.logger import log, log_last_rank
 from utils.startup.offline import run as offline_run
 from utils.startup.interactive import run as interactive_run
 
@@ -33,7 +33,7 @@ def main(ckpt_path, config, model_args, model_name, startup_type="online"):
 
     # 构建模型
     args = get_model_args(config, model_args)
-    num_stages = len(args.pp_layer_list)
+    num_stages = 1 if args.pp_layer_list is None else len(args.pp_layer_list)
     assert world_size % num_stages == 0
     pp_group_size = world_size // num_stages
     pp_stage = rank // pp_group_size
@@ -89,6 +89,7 @@ if __name__ == "__main__":
         dist.init_process_group("nccl")
     try:
         main(args.ckpt_path, args.config_path, model_args, args.model_name, args.startup_type)
+        log(f"rank {rank} Exit.")
     except Exception as e:
         raise e
     finally:

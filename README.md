@@ -16,7 +16,7 @@
 bash scripts/inference.sh     \
     ...                       \
     --max-batch-size 128      \ # 自定义变量以覆盖配置文件中的变量
-    tee | log/inference.log
+    | tee log/inference.log
 ```
 
 ### 1.2 离线模式
@@ -30,7 +30,7 @@ bash scripts/inference.sh                   \
     --config-path configs/config_671B.json  \
     --model-name deepseek_v3                \
     --startup-type scripts/inputs.txt       \
-    tee | log/inference.log
+    | tee log/inference.log
 ```
 
 ### 1.3 交互模式
@@ -44,7 +44,7 @@ bash scripts/inference.sh                   \
     --config-path configs/config_671B.json  \
     --model-name deepseek_v3                \
     --startup-type interactive              \
-    tee | log/inference.log
+    | tee log/inference.log
 ```
 
 ### 1.4 在线模式
@@ -60,7 +60,7 @@ bash scripts/inference.sh                   \
     --config-path configs/config_671B.json  \
     --model-name deepseek_v3                \
     --startup-type online                   \
-    tee | log/inference.log
+    | tee log/inference.log
 ```
 
 ## 2 环境准备
@@ -87,18 +87,7 @@ op-compile-tool 0.1.0 requires inspect, which is not installed.
 op-compile-tool 0.1.0 requires multiprocessing, which is not installed.
 ```
 
-#### 2.1.2 安装`torch_npu`
-
-```bash
-# 确认本地安装的pytorch版本
-pip list | grep torch
-# 到gitee中下载对应版本的torch_npu(以aarch64+py39+torch2.1.0为例)
-wget https://gitee.com/ascend/pytorch/releases/download/v6.0.rc2-pytorch2.1.0/torch_npu-2.1.0.post6-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-# 其他版本的`torch_npu`插件下载请参考：https://gitee.com/ascend/pytorch/releases
-pip install ./torch_npu-*.whl
-```
-
-#### 2.1.3 验证安装结果
+#### 2.1.2 验证安装结果
 
 ```bash
 python -c "import torch; import torch_npu; print(torch_npu.__version__)"

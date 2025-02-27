@@ -1,10 +1,9 @@
 import json
 import functools
-from typing import Literal
 from dataclasses import dataclass
 from utils.tools.logger import log_rank0
 from typing_extensions import get_origin
-from typing import get_type_hints, Literal, get_args
+from typing import Literal, get_type_hints, get_args
 
 def auto_convert_types(func):
     @functools.wraps(func)
@@ -149,5 +148,6 @@ def get_model_args(config_path, update_list):
             log_rank0(f"Unknow args: {key} = {value}")
     args.mini_batch_size = args.mini_batch_size if args.mini_batch_size > 0 else 1
     args.mini_batch_size = args.mini_batch_size if args.mini_batch_size < args.max_batch_size else args.max_batch_size
+    args.pp_layer_list = [args.n_layers] if args.pp_layer_list is None else args.pp_layer_list
     log_rank0(args)
     return args
