@@ -1,12 +1,13 @@
 import math
 import torch
+import torch_npu
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from model.deepseek.rms_norm import RMSNorm
 from utils.quantization.fp8 import fp8_dequant
 from utils.quantization.int4 import int4_dequant
 from utils.quantization.int8 import int8_dequant
+from model.deepseek.rms_norm import RMSNorm_NPU as RMSNorm
 from model.deepseek.linear import set_linear_args, get_linear, Linear
 from model.deepseek.rope import precompute_freqs_cis, apply_rotary_emb
 
@@ -235,6 +236,9 @@ class Gate(nn.Module):
         scores = scores.view(x.size(0), self.n_groups, -1)
         group_scores = self.group_scores_func(scores)
         indices = group_scores.topk(self.topk_groups, dim=-1)[1]
+        # mask = torch.zeros_like(scores[..., 0])
+        # for i in range(scores.shape[0]):
+        #     mask[i, indices[i]] = True
         mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
         scores = (scores * mask.unsqueeze(-1)).flatten(1)
         return scores
@@ -356,10 +360,10 @@ class Transformer(nn.Module):
         super().__init__()
         self.max_seq_len = args.max_seq_len
         assert args.max_batch_size % args.mini_batch_size == 0
-        assert self.pp_stage_num <= 1 or sum(args.pp_layer_list) == args.n_layers
-        assert self.pp_stage_num <= 1 or self.pp_stage < self.pp_stage_num
+        assert self.pp_stage_num < 2 or sum(args.pp_layer_list) == args.n_layers
+        assert self.pp_stage_num < 2 or self.pp_stage < self.pp_stage_num
         self.layers = torch.nn.ModuleList()
-        if self.pp_stage_num > 1 and self.pp_stage == 0:
+        if self.pp_stage_num < 2 or self.pp_stage == 0:
             self.embed = ParallelEmbedding(args.vocab_size, args.dim, self.tp_group)
         self.start_layer_id = sum(args.pp_layer_list[:pp_stage]) if self.pp_stage_num > 1 else 0
         self.end_layer_id = self.start_layer_id + (args.pp_layer_list[pp_stage] if self.pp_stage_num > 1 else args.n_layers)
@@ -368,13 +372,13 @@ class Transformer(nn.Module):
                 self.layers.append(Block(layer_id, self.args, self.device, self.tp_group))
             else:
                 self.layers.append(torch.nn.Identity())
-        if self.pp_stage_num > 1 and self.pp_stage == self.pp_stage_num - 1:
+        if self.pp_stage_num < 2 or self.pp_stage == self.pp_stage_num - 1:
             self.norm = RMSNorm(args.dim)
             self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype(), group=self.tp_group)
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.gather_logits = self.gather_logits if self.local_size > 1 else lambda x: x
-        self.recv_h = self.recv_h_remote if self.pp_stage_num > 1 and self.pp_stage != 0 else self.recv_h_local
-        self.send_h = self.send_h_remote if self.pp_stage_num > 1 and self.pp_stage != self.pp_stage_num - 1 else self.send_h_local
+        self.recv_h = self.recv_h_local if self.pp_stage_num < 2 or self.pp_stage == 0 else self.recv_h_remote
+        self.send_h = self.send_h_local if self.pp_stage_num < 2 or self.pp_stage == self.pp_stage_num - 1 else self.send_h_remote
         self.dst_rank = (self.pp_stage + 1) * self.local_size + (self.global_rank % self.local_size)
         self.src_rank = (self.pp_stage - 1) * self.local_size + (self.global_rank % self.local_size)
         self.dst_rank = self.dst_rank if self.dst_rank < self.global_size else self.dst_rank - self.global_size
@@ -385,23 +389,22 @@ class Transformer(nn.Module):
         dist.all_gather(all_logits, logits, group=self.tp_group)
         return torch.cat(all_logits, dim=-1)
 
-    def recv_h_local(self, tokens):
-        h = self.embed(tokens)
-        return h
+    def recv_h_local(self, tokens, tag):
+        yield from self.embed(tokens)
 
-    def recv_h_remote(self, tokens):
+    def recv_h_remote(self, tokens, tag):
         batch_size, seqlen = tokens.shape
         h = torch.zeros(batch_size, seqlen, self.args.dim, device=self.device)
-        dist.recv(h, src=self.src_rank)
+        dist.recv(h, src=self.src_rank, tag=tag)
         return h
 
-    def send_h_local(self, h):
+    def send_h_local(self, h, tag):
         h = self.norm(h)[:, -1]
         logits = self.gather_logits(self.head(h))
         return logits
 
-    def send_h_remote(self, h):
-        dist.send(h, dst=self.dst_rank)
+    def send_h_remote(self, h, tag):
+        dist.send(h, dst=self.dst_rank, tag=tag)
         return None
 
     def update_wkv_b_cache(self):
@@ -411,13 +414,13 @@ class Transformer(nn.Module):
     @torch.inference_mode()
     def forward(self, tokens, bsz_index=0, start_pos=0):
         seqlen = tokens.size(1)
+        h = self.recv_h(tokens, bsz_index)
         freqs_cis = self.freqs_cis[start_pos: start_pos + seqlen]
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
             mask_func = lambda x: x + mask.unsqueeze(1)
         else:
             mask_func = lambda x: x
-        h = self.recv_h(tokens)
         for layer_id in range(self.start_layer_id, self.end_layer_id):
             h = self.layers[layer_id](h, bsz_index, start_pos, freqs_cis, mask_func)
-        return self.send_h(h)
+        return self.send_h(h, bsz_index)

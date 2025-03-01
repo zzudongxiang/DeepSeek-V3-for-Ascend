@@ -1,4 +1,5 @@
 .ipynb_checkpoints
+.cursorignore
 __pycache__
 model_*.*
 logs/

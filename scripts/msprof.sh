@@ -11,7 +11,9 @@ ARGS="
     --model-name deepseek_pp            \
     --startup-type ./scripts/inputs.txt \
     --pp-layer-list 17,15,15,14         \
-    --max-batch-size 1                  \
+    --use_random_weights true           \
+    --max-batch-size 4                  \
+    --mini-batch-size 1                 \
     --max-new-tokens 10                 \
 "
 

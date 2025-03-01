@@ -1,15 +1,10 @@
 import torch
+import torch_npu
 from torch import nn
 import torch.nn.functional as F
 from utils.quantization.fp8 import fp8_dequant
 from utils.quantization.int4 import int4_dequant
 from utils.quantization.int8 import int8_dequant
-
-try:
-    import torch_npu
-    default_device = "npu"
-except:
-    default_device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # aarch架构的torch2.1在cpu上执行gemm时出现异常
 # https://www.hiascend.com/doc_center/source/zh/Pytorch/60RC1/comref/comaq/commonqa_0021.html
@@ -30,18 +25,18 @@ def set_linear_args(local_gemm_impl: str, local_fp8_quant_block_size: int, local
         post_process = lambda x: x
 
 def pre_process(x, weight, bias):
-    x = x.to(default_device)
+    x = x.npu()
     if hasattr(weight, "scale"):
-        scale = weight.scale.to(default_device)
-        weight = weight.to(default_device)
+        scale = weight.scale.npu()
+        weight = weight.npu()
         weight.scale = scale
     else:
-        weight = weight.to(default_device)
-    bias = bias.to(default_device) if bias is not None else None
+        weight = weight.npu()
+    bias = bias.npu() if bias is not None else None
     return x, weight, bias
 
 def post_process(x):
-    return x.to(default_device)
+    return x.npu()
 
 def fp8_bf16_linear(x, weight, bias=None):
     weight = fp8_dequant(weight, weight.scale, fp8_quant_block_size)
