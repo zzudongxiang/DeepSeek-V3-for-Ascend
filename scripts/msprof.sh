@@ -3,7 +3,7 @@ set -e
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 OUT_PUT="log"
-rm -rf ${OUT_PUT} && mkdir -p ${OUT_PUT}
+rm -rf ${OUT_PUT}/PROF_* && mkdir -p ${OUT_PUT}
 
 ARGS="
     --ckpt-path ../ckpt/v3-int4-mp2     \
