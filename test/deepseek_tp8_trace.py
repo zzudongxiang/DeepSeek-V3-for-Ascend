@@ -171,6 +171,7 @@ class Transformer(nn.Module):
 # MLA: 5.47ms
 # MLP: 1.6ms
 # MoE: 10ms
-#  |- Routed_Expert: 1.5ms
+#  |- Routed_Expert: 1.5ms (Rank 0 Layer 3 共计3个Expert选中，每个耗时1.5ms左右)
 #  |- Shared_Expert: 0.6ms
+#  |- Bincount: 0.7ms (降级为CPU Kernel)
 
