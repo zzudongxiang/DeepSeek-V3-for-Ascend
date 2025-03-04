@@ -113,7 +113,7 @@ class MoE(nn.Module):
                                                                                                 # Layer 3 [MoE] 2195 -> 2230: 1.351ms
                                                                                                 # Layer 3 [MoE] 2239 -> 2321: 1.420ms
 
-        z = self.shared_experts(x)                                                              # Layer 3 [MoE] 2321 -> 2417: 0.597ms (14KB -> 1.0GB/s)
+        z = self.shared_experts(x)                                                              # Layer 3 [MoE] 2321 -> 2417: 0.597ms (14KB -> 1.0GB/s) !!!偶尔会特别慢(1.27MB/s)!!!
         dist.all_reduce(y)                                                                      # Layer 3 [MoE] 2417 -> 2467: 0.030ms (14KB -> 0.95GB/s)
         return (y + z).view(shape)                                                              # Layer 3 [MoE] 2467 -> 2486: 0.104ms
 
@@ -173,5 +173,72 @@ class Transformer(nn.Module):
 # MoE: 10ms
 #  |- Routed_Expert: 1.5ms (Rank 0 Layer 3 共计3个Expert选中，每个耗时1.5ms左右)
 #  |- Shared_Expert: 0.6ms
+#  |- Shared_Expert的AllReduce大概率会特别慢(1.27MB/s), 但是也有正常的时候(1GB/s)
 #  |- Bincount: 0.7ms (降级为CPU Kernel)
 
+
+# Decode Head Tag: aclnnEmbedding_GatherV2AiCore_GatherV2
+
+# Layer Tags
+# --------------------
+# Layer 0 [Dense] 232
+# Layer 1 [Dense] 551
+# Layer 2 [Dense] 860
+# Layer 3 [MoE] 1275
+# Layer 4 [MoE] 2513
+# Layer 5 [MoE] 3896
+# Layer 6 [MoE] 4986
+# Layer 7 [MoE] 5800
+# Layer 8 [MoE] 7259
+# Layer 9 [MoE] 8501
+# Layer 10 [MoE] 9633
+# Layer 11 [MoE] 11099
+# Layer 12 [MoE] 12234
+# Layer 13 [MoE] 13583
+# Layer 14 [MoE] 14824
+# Layer 15 [MoE] 16044
+# Layer 16 [MoE] 16965
+# Layer 17 [MoE] 17862
+# Layer 18 [MoE] 18780
+# Layer 19 [MoE] 19679
+# Layer 20 [MoE] 20601
+# Layer 21 [MoE] 21506
+# Layer 22 [MoE] 22323
+# Layer 23 [MoE] 23432
+# Layer 24 [MoE] 24386
+# Layer 25 [MoE] 25470
+# Layer 26 [MoE] 26384
+# Layer 27 [MoE] 27214
+# Layer 28 [MoE] 28109
+# Layer 29 [MoE] 29240
+# Layer 30 [MoE] 30467
+# Layer 31 [MoE] 31288
+# Layer 32 [MoE] 32302
+# Layer 33 [MoE] 33570
+# Layer 34 [MoE] 34659
+# Layer 35 [MoE] 35569
+# Layer 36 [MoE] 36477
+# Layer 37 [MoE] 37382
+# Layer 38 [MoE] 38295
+# Layer 39 [MoE] 39109
+# Layer 40 [MoE] 40239
+# Layer 41 [MoE] 41684
+# Layer 42 [MoE] 42502
+# Layer 43 [MoE] 43850
+# Layer 44 [MoE] 44986
+# Layer 45 [MoE] 46117
+# Layer 46 [MoE] 47335
+# Layer 47 [MoE] 48157
+# Layer 48 [MoE] 49999
+# Layer 49 [MoE] 50896
+# Layer 50 [MoE] 51895
+# Layer 51 [MoE] 53027
+# Layer 52 [MoE] 54264
+# Layer 53 [MoE] 55488
+# Layer 54 [MoE] 56401
+# Layer 55 [MoE] 57218
+# Layer 56 [MoE] 58440
+# Layer 57 [MoE] 59259
+# Layer 58 [MoE] 60263
+# Layer 59 [MoE] 61076
+# Layer 60 [MoE] 62337
