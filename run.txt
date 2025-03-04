@@ -1,0 +1,1 @@
+bash scripts/inference.sh --ckpt-path ../../ckpt/v3-int4-mp8/ --config-path configs/config_671B.json --model-name deepseek_v3 --startup-type scripts/test_input.txt > run.log 2>&1

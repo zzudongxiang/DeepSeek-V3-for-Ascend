@@ -1,7 +1,7 @@
 from utils.logger import log_rank0
 from utils.generate import batch_generate
 
-def run(model, tokenizer, file_path):
+def run (model, tokenizer, file_path):
     with open(file_path) as f:
         prompts = [line.strip() for line in f.readlines()]
     if len(prompts) > model.args.max_batch_size:

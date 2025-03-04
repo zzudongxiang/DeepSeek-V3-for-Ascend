@@ -10,14 +10,8 @@ from utils.quantization.int4 import int4_dequant
 from utils.quantization.int8 import int8_dequant
 from model.deepseek.linear import set_linear_args, get_linear
 from model.deepseek.rope import precompute_freqs_cis, apply_rotary_emb
-import os
-from typing import Optional
 
 rank, world_size = 0, 1  # world_size表示参与分布式计算的进程总数（或者说设备总数）
-
-def save_tensor(tensor: torch.Tensor, path: str, filename: str):
-    os.makedirs(path, exist_ok=True)
-    torch.save(tensor.detach().cpu(), os.path.join(path, filename))
 
 class ParallelEmbedding(nn.Module):
     def __init__(self, vocab_size: int, dim: int):
@@ -241,9 +235,9 @@ class Gate(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.dim = args.dim
-        self.topk = args.n_activated_experts # 8
-        self.n_groups = args.n_expert_groups # 8
-        self.topk_groups = args.n_limited_groups # 4
+        self.topk = args.n_activated_experts
+        self.n_groups = args.n_expert_groups
+        self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
         self.route_scale = args.route_scale
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
@@ -262,35 +256,21 @@ class Gate(nn.Module):
             self.group_scores_func = lambda x: x.amax(dim=-1)
         else:
             self.add_bias = lambda x: x + self.bias
-            self.group_scores_func = lambda x: x.topk(2, dim=-1)[0].sum(dim=-1) # topk # 返回一个元组 (values, indices), values 表示每个 group 中得分最高的 topk_groups 个专家的得分, indices 表示每个 group 中得分最高的 topk_groups 个专家的索引
+            self.group_scores_func = lambda x: x.topk(2, dim=-1)[0].sum(dim=-1)
         self.calc_group_score = self.calc_group_score if self.n_groups > 1 else lambda x, scores: scores
-        self.should_save = False  # 添加控制保存的标志
-        self.layer_id = None  # 添加layer_id用于保存路径
 
     def calc_group_score(self, x, scores):
         scores = scores.view(x.size(0), self.n_groups, -1)
-        group_scores = self.group_scores_func(scores) # [batch_size, n_groups]，表示每个 group 的重要性得分
-        indices = group_scores.topk(self.topk_groups, dim=-1)[1] # [batch_size, topk_groups]，表示每个 group 中得分最高的 topk_groups 个专家的索引
-        mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True) # [batch_size, n_groups]，表示每个 group 中得分最高的 topk_groups 个专家的掩码
+        group_scores = self.group_scores_func(scores)
+        indices = group_scores.topk(self.topk_groups, dim=-1)[1]
+        mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
         scores = (scores * mask.unsqueeze(-1)).flatten(1)
-        return scores   # [batch_size, n_routed_experts]，但其中仅 topk_groups * experts_per_group 个分数有效，其他值为 0
+        return scores
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         scores = self.get_score(self.linear(x, self.weight))    # [batch_size, n_routed_experts]
         original_scores = scores
-
-        # 保存加上bias前的gate scores
-        if self.should_save and rank == 0 and self.layer_id is not None:
-            save_path = f"saves/layer_{self.layer_id}/moe/gate"
-            save_tensor(original_scores, save_path, "scores_before_bias.pt")
-
         scores = self.add_bias(scores)
-        
-        # 保存加上bias后的gate scores
-        if self.should_save and rank == 0 and self.layer_id is not None:
-            save_path = f"saves/layer_{self.layer_id}/moe/gate"
-            save_tensor(scores, save_path, "scores_after_bias.pt")
-            
         scores = self.calc_group_score(x, scores)   # [batch_size, n_groups, experts_per_group]
         indices = torch.topk(scores, self.topk, dim=-1)[1]   # [batch_size, topk]
         weights = original_scores.gather(1, indices)   # [batch_size, topk]
@@ -325,7 +305,6 @@ class MoE(nn.Module):
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.gate.layer_id = layer_id  # 设置gate的layer_id
         self.experts = nn.ModuleList([
             Expert(args.dim, args.moe_inter_dim, layer_id, i).to("cpu" if args.offload_cpu else device)
             if self.experts_start_idx <= i < self.experts_end_idx else None
@@ -334,7 +313,6 @@ class MoE(nn.Module):
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
         self.data_reduce = self.data_reduce if world_size > 1 else lambda x: x
         self.calc = self.calc_in_cpu if args.offload_cpu else self.calc_in_xpu
-        self.should_save = False  # 添加控制保存的标志
 
     def data_reduce(self, x):
         dist.all_reduce(x)
@@ -351,9 +329,6 @@ class MoE(nn.Module):
         return y
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 传递should_save标志给gate
-        self.gate.should_save = self.should_save
-        
         shape = x.size()
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x)
@@ -374,52 +349,15 @@ class Block(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs, device: str):
         super().__init__()
         self.device = device
-        self.layer_id = layer_id
         self.attn = MLA(args, layer_id)
+        # 前三层是稠密层，没有MoE
         self.ffn = MLP(args.dim, args.inter_dim, x_shape="NCL") if layer_id < args.n_dense_layers else MoE(args, device, layer_id)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
-        self.should_save = False
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask_func) -> torch.Tensor:
-        if self.should_save and rank == 0:
-            base_path = f"saves/layer_{self.layer_id}"
-            
-            # 保存注意力层标准化的输入输出
-            save_tensor(x, f"{base_path}/attn_norm", "input.pt")
-            attn_norm_out = self.attn_norm(x)
-            save_tensor(attn_norm_out, f"{base_path}/attn_norm", "output.pt")
-            
-            # 保存注意力层的输入输出
-            save_tensor(attn_norm_out, f"{base_path}/attn", "input.pt")
-            attn_out = self.attn(attn_norm_out, start_pos, freqs_cis, mask_func)
-            save_tensor(attn_out, f"{base_path}/attn", "output.pt")
-            
-            # 有一次残差连接，attn_out与ffn_input不一样
-            x = x + attn_out
-            
-            # 保存前馈层标准化的输入输出
-            save_tensor(x, f"{base_path}/ffn_norm", "input.pt")
-            ffn_norm_out = self.ffn_norm(x)
-            save_tensor(ffn_norm_out, f"{base_path}/ffn_norm", "output.pt")
-            
-            # 如果是MoE层，传递should_save标志
-            if isinstance(self.ffn, MoE):
-                self.ffn.should_save = True
-
-            # 保存前馈层的输入输出
-            save_tensor(ffn_norm_out, f"{base_path}/ffn", "input.pt")
-            ffn_out = self.ffn(ffn_norm_out)
-            save_tensor(ffn_out, f"{base_path}/ffn", "output.pt")
-            
-            x = x + ffn_out
-            
-            # 重置MoE的should_save标志
-            if isinstance(self.ffn, MoE):
-                self.ffn.should_save = False
-        else:
-            x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask_func)
-            x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask_func)
+        x = x + self.ffn(self.ffn_norm(x))
         return x
 
 
@@ -449,8 +387,6 @@ class Transformer(nn.Module):
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.gather_logits = self.gather_logits if world_size > 1 else lambda x: x
-        self.save_done = False  # 保存完成标记
-        self.inference_count = 0  # 添加推理计数器
 
     def gather_logits(self, logits):
         all_logits = [torch.empty_like(logits) for _ in range(world_size)]
@@ -460,47 +396,15 @@ class Transformer(nn.Module):
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         seqlen = tokens.size(1)
-        
-        # self.inference_count += 1
-        # should_save_this_time = (self.inference_count == 800) and (not self.save_done) and (rank == 0)
-        if seqlen > 1 and rank == 0 :
-            should_save_this_time = True
-        else:
-            should_save_this_time = False
-        
-        if should_save_this_time:
-            # 保存embedding层的输入输出
-            save_tensor(tokens, "saves/embedding", "input.pt")
-            h = self.embed(tokens)
-            save_tensor(h, "saves/embedding", "output.pt")
-        else:
-            h = self.embed(tokens)
-            
-        freqs_cis = self.freqs_cis[start_pos:start_pos + tokens.size(1)]
-        
+        h = self.embed(tokens)
+        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
             mask_func = lambda x: x + mask.unsqueeze(1)
         else:
             mask_func = lambda x: x
-            
-        if should_save_this_time:
-            print(f"Saving layer time: {self.inference_count}")
-            # 设置所有层保存中间结果
-            for layer in self.layers:
-                layer.should_save = True
-                
         for layer in self.layers:
-            if should_save_this_time:
-                print(f"input:{torch.sum(h)}")
             h = layer(h, start_pos, freqs_cis, mask_func)
-            
-        if should_save_this_time:
-            # 关闭保存并标记已完成
-            for layer in self.layers:
-                layer.should_save = False
-            self.save_done = True
-            
         h = self.norm(h)[:, -1]
         logits = self.gather_logits(self.head(h))
         return logits

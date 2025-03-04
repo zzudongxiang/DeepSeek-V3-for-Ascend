@@ -4,8 +4,15 @@ model_*.*
 logs/
 log/
 
+*.tar.gz
+*.log
+
 fusion_result.json
 kernel_meta/
 extra-info/
-ckpt-saved/
+ckpt/
 dump/
+ckpt_q4/
+analysis_results/
+saves/
+
