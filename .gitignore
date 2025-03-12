@@ -3,6 +3,7 @@ __pycache__
 model_*.*
 logs/
 log/
+log_moe_prefetch/
 
 *.tar.gz
 *.log

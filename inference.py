@@ -34,7 +34,9 @@ def load_model_weight(model, ckpt_path):
         load_index = 0
         total_num = len(f.keys())
         for k in model_state_dict:
-            assert k in f.keys(), k
+            # assert k in f.keys(), k
+            if "_next_layer_moe" in k:
+                continue
             model_state_dict[k].copy_(f.get_tensor(k))
             progress_value = load_index / total_num
             load_index += 1

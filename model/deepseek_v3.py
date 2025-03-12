@@ -8,6 +8,7 @@ from model.deepseek.args import ModelArgs
 from utils.quantization.fp8 import fp8_dequant
 from utils.quantization.int4 import int4_dequant
 from utils.quantization.int8 import int8_dequant
+from utils.logger import log_moe_prefetch_rank0
 from model.deepseek.linear import set_linear_args, get_linear
 from model.deepseek.rope import precompute_freqs_cis, apply_rotary_emb
 import os
@@ -266,6 +267,7 @@ class Gate(nn.Module):
         self.calc_group_score = self.calc_group_score if self.n_groups > 1 else lambda x, scores: scores
         self.should_save = False  # 添加控制保存的标志
         self.layer_id = None  # 添加layer_id用于保存路径
+        self.prefetch_mode = "decode"  # 默认为decode模式
 
     def calc_group_score(self, x, scores):
         scores = scores.view(x.size(0), self.n_groups, -1)
@@ -335,6 +337,60 @@ class MoE(nn.Module):
         self.data_reduce = self.data_reduce if world_size > 1 else lambda x: x
         self.calc = self.calc_in_cpu if args.offload_cpu else self.calc_in_xpu
         self.should_save = False  # 添加控制保存的标志
+        
+        # 预取相关属性 - 设置为非持久化参数
+        self.register_buffer("_prefetch_indices", None, persistent=False)
+        self.register_buffer("_actual_indices", None, persistent=False)
+        self._prefetch_hit_count = 0   # 预取命中计数
+        self._prefetch_total_count = 0 # 预取总次数
+        self._prefetched_experts = set()  # 已预取的专家集合
+        self.offload_cpu = args.offload_cpu  # 是否将专家卸载到CPU
+        
+        # 添加推理步骤计数器
+        self.inference_step = 0
+        self._file_initialized = False  # 添加文件初始化标志
+        self.prefetch_mode = "decode"  # 默认为decode模式
+        
+    # 为预取相关属性添加属性访问器
+    @property
+    def prefetch_indices(self):
+        return self._prefetch_indices
+        
+    @prefetch_indices.setter
+    def prefetch_indices(self, value):
+        self._prefetch_indices = value
+        
+    @property
+    def actual_indices(self):
+        return self._actual_indices
+        
+    @actual_indices.setter
+    def actual_indices(self, value):
+        self._actual_indices = value
+        
+    @property
+    def prefetch_hit_count(self):
+        return self._prefetch_hit_count
+        
+    @prefetch_hit_count.setter
+    def prefetch_hit_count(self, value):
+        self._prefetch_hit_count = value
+        
+    @property
+    def prefetch_total_count(self):
+        return self._prefetch_total_count
+        
+    @prefetch_total_count.setter
+    def prefetch_total_count(self, value):
+        self._prefetch_total_count = value
+        
+    @property
+    def prefetched_experts(self):
+        return self._prefetched_experts
+        
+    @prefetched_experts.setter
+    def prefetched_experts(self, value):
+        self._prefetched_experts = value
 
     def data_reduce(self, x):
         dist.all_reduce(x)
@@ -350,6 +406,102 @@ class MoE(nn.Module):
         y[idx] += expert(x[idx]) * weights
         return y
 
+    def prefetch_experts(self, indices: torch.Tensor):
+        """预取专家模型
+        
+        Args:
+            indices: 预测的专家索引
+        """
+        if indices is None:
+            return
+        
+        # 获取需要预取的专家索引
+        expert_indices = set(indices.flatten().tolist())
+        
+        # 只预取本节点负责的专家
+        local_expert_indices = [i for i in expert_indices 
+                               if self.experts_start_idx <= i < self.experts_end_idx]
+        
+        # 记录已预取的专家
+        for i in local_expert_indices:
+            if i not in self.prefetched_experts:
+                # 如果专家被卸载到CPU，则预取到设备内存
+                if self.offload_cpu and i >= self.experts_start_idx and i < self.experts_end_idx:
+                    expert = self.experts[i]
+                    if expert is not None and next(expert.parameters()).device != self.device:
+                        # 打印预取信息
+                        log_moe_prefetch_rank0(f"Prefetching expert {i} for layer {self.layer_id}")
+                        # 将专家移动到设备
+                        self.experts[i] = expert.to(self.device)
+                self.prefetched_experts.add(i)
+
+    def predict_next_layer_experts(self, x: torch.Tensor) -> torch.Tensor:
+        """预测下一层可能需要的专家索引"""
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        with torch.no_grad():
+            # 只使用gate进行预测，不执行实际的专家计算
+            _, indices = self.gate(x)
+        return indices
+
+    def record_actual_indices(self, indices: torch.Tensor):
+        """记录实际使用的专家索引"""
+        self.actual_indices = indices
+
+    def calculate_prefetch_hit_rate(self, mode="decode"):
+        """计算预取命中率"""
+        if self.prefetch_indices is None or self.actual_indices is None:
+            return 0.0
+        
+        # 将预测的索引和实际索引转换为集合
+        prefetch_set = set(self.prefetch_indices.flatten().tolist())
+        actual_set = set(self.actual_indices.flatten().tolist())
+        
+        # 保存第一个batch的预取索引和实际索引数据
+        if rank == 0:  # 只在rank 0上保存
+            save_path = f"saves/layer_{self.layer_id}/moe/prefetch"
+            os.makedirs(save_path, exist_ok=True)
+            
+            # 获取第一个batch的数据
+            first_batch_prefetch = self.prefetch_indices[0].detach().cpu()
+            first_batch_actual = self.actual_indices[0].detach().cpu()
+            
+            # 根据模式选择文件后缀
+            suffix = "_prefill" if mode == "prefill" else "_decode"
+            
+            # 保存张量数据
+            torch.save(first_batch_prefetch, os.path.join(save_path, f"prefetch_indices{suffix}.pt"))
+            torch.save(first_batch_actual, os.path.join(save_path, f"actual_indices{suffix}.pt"))
+            
+            # 文本文件路径
+            txt_file = os.path.join(save_path, f"indices_info{suffix}.txt")
+            
+            # 如果是第一次调用，清空文件
+            if not hasattr(self, f'_file_initialized_{mode}'):
+                with open(txt_file, "w") as f:
+                    f.write("")  # 清空文件
+                setattr(self, f'_file_initialized_{mode}', True)
+            
+            # 追加写入新的数据
+            with open(txt_file, "a") as f:
+                f.write(f"\n=== Inference Step {self.inference_step} ===\n")
+                f.write(f"Prefetch indices: {first_batch_prefetch.tolist()}\n")
+                f.write(f"Actual indices: {first_batch_actual.tolist()}\n")
+                f.write(f"Prefetch set: {sorted(list(prefetch_set))}\n")
+                f.write(f"Actual set: {sorted(list(actual_set))}\n")
+                f.write(f"Common indices: {sorted(list(prefetch_set.intersection(actual_set)))}\n")
+                f.write(f"Hit rate: {len(prefetch_set.intersection(actual_set)) / len(actual_set) if len(actual_set) > 0 else 0:.4f}\n")
+        
+        # 计算交集大小
+        hit_count = len(prefetch_set.intersection(actual_set))
+        self.prefetch_hit_count += hit_count
+        self.prefetch_total_count += len(actual_set)
+        
+        # 返回命中率
+        if len(actual_set) == 0:
+            return 0.0
+        return hit_count / len(actual_set)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # 传递should_save标志给gate
         self.gate.should_save = self.should_save
@@ -357,6 +509,16 @@ class MoE(nn.Module):
         shape = x.size()
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x)
+        
+        # 记录实际使用的专家索引
+        self.record_actual_indices(indices)
+        
+        # 计算命中率时传入当前模式
+        hit_rate = self.calculate_prefetch_hit_rate(self.prefetch_mode)
+        if rank == 0 and self.prefetch_total_count > 0:
+            log_moe_prefetch_rank0(f"Layer {self.layer_id} MoE prefetch hit rate: {hit_rate:.4f}, "
+                         f"Total hit rate: {self.prefetch_hit_count / self.prefetch_total_count:.4f}")
+        
         y = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
         for i in range(self.experts_start_idx, self.experts_end_idx):
@@ -365,8 +527,18 @@ class MoE(nn.Module):
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
             y = self.calc(x, y, idx, expert, weights[idx, top, None])
+            
+            # 使用完专家后，如果需要卸载到CPU，则进行卸载
+            if self.offload_cpu and i in self.prefetched_experts:
+                self.experts[i] = expert.to("cpu")
+                self.prefetched_experts.remove(i)
+                
         z = self.shared_experts(x)
         y = self.data_reduce(y)
+        
+        # 更新推理步骤计数器
+        self.inference_step += 1
+        
         return (y + z).view(shape)
 
 
@@ -380,6 +552,17 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
         self.should_save = False
+        # 预取相关属性 - 将next_layer_moe设置为非持久化参数
+        self.register_buffer("_next_layer_moe", None, persistent=False)
+
+    def set_next_layer_moe(self, next_layer_moe):
+        """设置下一层的MoE引用"""
+        self._next_layer_moe = next_layer_moe
+        
+    @property
+    def next_layer_moe(self):
+        """获取下一层的MoE引用"""
+        return self._next_layer_moe
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask_func) -> torch.Tensor:
         if self.should_save and rank == 0:
@@ -395,7 +578,6 @@ class Block(nn.Module):
             attn_out = self.attn(attn_norm_out, start_pos, freqs_cis, mask_func)
             save_tensor(attn_out, f"{base_path}/attn", "output.pt")
             
-            # 有一次残差连接，attn_out与ffn_input不一样
             x = x + attn_out
             
             # 保存前馈层标准化的输入输出
@@ -403,9 +585,21 @@ class Block(nn.Module):
             ffn_norm_out = self.ffn_norm(x)
             save_tensor(ffn_norm_out, f"{base_path}/ffn_norm", "output.pt")
             
+            # 如果当前层是MoE层且下一层也是MoE层，进行预取
+            if isinstance(self.ffn, MoE) and self.next_layer_moe is not None:
+                # 使用当前层的MoE输入预测下一层可能需要的专家
+                next_layer_indices = self.next_layer_moe.predict_next_layer_experts(ffn_norm_out)
+                # 存储预测的专家索引到下一层MoE
+                self.next_layer_moe.prefetch_indices = next_layer_indices
+                # 执行实际的预取逻辑
+                self.next_layer_moe.prefetch_experts(next_layer_indices)
+            
             # 如果是MoE层，传递should_save标志
             if isinstance(self.ffn, MoE):
                 self.ffn.should_save = True
+                # 设置预取模式为"prefetch"
+                self.ffn.prefetch_mode = "prefill"
+                print(f"Layer {self.layer_id} MoE prefill mode")
 
             # 保存前馈层的输入输出
             save_tensor(ffn_norm_out, f"{base_path}/ffn", "input.pt")
@@ -414,12 +608,31 @@ class Block(nn.Module):
             
             x = x + ffn_out
             
-            # 重置MoE的should_save标志
+            # 重置MoE的should_save标志和预取模式
             if isinstance(self.ffn, MoE):
                 self.ffn.should_save = False
+
         else:
-            x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask_func)
-            x = x + self.ffn(self.ffn_norm(x))
+            # 注意力层处理
+            attn_norm_out = self.attn_norm(x)
+            attn_out = self.attn(attn_norm_out, start_pos, freqs_cis, mask_func)
+            x = x + attn_out
+            
+            # 前馈层标准化
+            ffn_norm_out = self.ffn_norm(x)
+            
+            # 如果当前层是MoE层且下一层也是MoE层，进行预取
+            if isinstance(self.ffn, MoE):
+                self.ffn.prefetch_mode = "decode"
+                if self.next_layer_moe is not None:
+                    next_layer_indices = self.next_layer_moe.predict_next_layer_experts(ffn_norm_out)
+                    self.next_layer_moe.prefetch_indices = next_layer_indices
+                    self.next_layer_moe.prefetch_experts(next_layer_indices)
+            
+            # 执行前馈层计算
+            ffn_out = self.ffn(ffn_norm_out)
+            x = x + ffn_out
+            
         return x
 
 
@@ -445,21 +658,76 @@ class Transformer(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args, self.device))
+        
+        # 设置每一层的next_layer_moe引用
+        for i in range(len(self.layers) - 1):
+            current_layer = self.layers[i]
+            next_layer = self.layers[i + 1]
+            
+            # 如果当前层和下一层都是MoE层，设置next_layer_moe引用
+            if (isinstance(current_layer.ffn, MoE) and 
+                isinstance(next_layer.ffn, MoE)):
+                current_layer.set_next_layer_moe(next_layer.ffn)
+        
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.gather_logits = self.gather_logits if world_size > 1 else lambda x: x
         self.save_done = False  # 保存完成标记
-        self.inference_count = 0  # 添加推理计数器
+        
+        # 将统计相关属性设置为非持久化
+        self._inference_count = 0  # 添加推理计数器
+        self._total_prefetch_hit_count = 0  # 总预取命中计数
+        self._total_prefetch_total_count = 0  # 总预取总次数
+        
+    # 为统计相关属性添加属性访问器
+    @property
+    def inference_count(self):
+        return self._inference_count
+        
+    @inference_count.setter
+    def inference_count(self, value):
+        self._inference_count = value
+        
+    @property
+    def total_prefetch_hit_count(self):
+        return self._total_prefetch_hit_count
+        
+    @total_prefetch_hit_count.setter
+    def total_prefetch_hit_count(self, value):
+        self._total_prefetch_hit_count = value
+        
+    @property
+    def total_prefetch_total_count(self):
+        return self._total_prefetch_total_count
+        
+    @total_prefetch_total_count.setter
+    def total_prefetch_total_count(self, value):
+        self._total_prefetch_total_count = value
 
     def gather_logits(self, logits):
         all_logits = [torch.empty_like(logits) for _ in range(world_size)]
         dist.all_gather(all_logits, logits)
         return torch.cat(all_logits, dim=-1)
+        
+    def get_prefetch_statistics(self):
+        """获取所有MoE层的预取统计信息"""
+        total_hit_count = 0
+        total_count = 0
+        
+        for layer in self.layers:
+            if isinstance(layer.ffn, MoE):
+                moe = layer.ffn
+                total_hit_count += moe.prefetch_hit_count
+                total_count += moe.prefetch_total_count
+                
+        return total_hit_count, total_count
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         seqlen = tokens.size(1)
+        
+        self.inference_count += 1
         
         # self.inference_count += 1
         # should_save_this_time = (self.inference_count == 800) and (not self.save_done) and (rank == 0)
@@ -491,8 +759,8 @@ class Transformer(nn.Module):
                 layer.should_save = True
                 
         for layer in self.layers:
-            if should_save_this_time:
-                print(f"input:{torch.sum(h)}")
+            # if should_save_this_time:
+            #     print(f"input:{torch.sum(h)}")
             h = layer(h, start_pos, freqs_cis, mask_func)
             
         if should_save_this_time:
@@ -500,6 +768,13 @@ class Transformer(nn.Module):
             for layer in self.layers:
                 layer.should_save = False
             self.save_done = True
+            
+        # 每100次推理输出一次预取统计信息
+        if self.inference_count % 50 == 0 and rank == 0:
+            hit_count, total_count = self.get_prefetch_statistics()
+            if total_count > 0:
+                hit_rate = hit_count / total_count
+                log_moe_prefetch_rank0(f"Inference {self.inference_count}, Total MoE prefetch hit rate: {hit_rate:.4f} ({hit_count}/{total_count})")
             
         h = self.norm(h)[:, -1]
         logits = self.gather_logits(self.head(h))

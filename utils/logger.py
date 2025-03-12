@@ -15,6 +15,17 @@ except:
     log_file = None
     print(f"Unable to write to log file: {log_filename}")
 
+try:
+    if rank == 0:
+        if not os.path.exists("log_moe_prefetch"):
+            os.makedirs("log_moe_prefetch", exist_ok=True)
+        log_file_moe_prefetch = open(f"log_moe_prefetch/{log_filename}.log", "w+", encoding="utf8")
+    else:
+        log_file_moe_prefetch = None
+except:
+    log_file_moe_prefetch = None
+    print(f"Unable to write to log file: {log_filename}")
+
 def log(message):
     log_str = f"[{datetime.now()}] {message}\n"
     if log_file is not None:
@@ -26,6 +37,14 @@ def log_rank0(message):
     if rank != 0:
         return
     log(message)
+
+def log_moe_prefetch_rank0(message):
+    if rank != 0:
+        return
+    if log_file_moe_prefetch is not None:
+        log_file_moe_prefetch.writelines(f"{message}\n")
+        log_file_moe_prefetch.flush()
+    print(message)
 
 def format_time(seconds):
     hours = int(seconds // 3600)
