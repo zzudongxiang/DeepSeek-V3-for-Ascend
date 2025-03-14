@@ -1,7 +1,7 @@
 import json
 import socket
 import threading
-from utils.logger import log
+from utils.tools.logger import log
 
 class Server:
     def __init__(self, host='localhost', port=5001):
@@ -9,6 +9,8 @@ class Server:
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)  # 设置发送缓冲区为 1MB
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)  # 设置接收缓冲区为 1MB
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(128)
         self.clients = []
@@ -29,7 +31,8 @@ class Server:
             message = json.dumps(data).encode('utf-8')
             message_length = len(message)
             client_socket.send(message_length.to_bytes(4, 'big'))
-            client_socket.send(message)
+            for i in range(0, message_length, 1024):
+                client_socket.send(message[i:i+1024])
         except Exception as e:
             log(f"Error Sending to Client: {e} data: {data}")
 
@@ -61,6 +64,8 @@ class Client:
         self.host = host
         self.port = port
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)  # 设置发送缓冲区为 1MB
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)  # 设置接收缓冲区为 1MB
         self.connected = False
         self.receive_thread = None
 
@@ -80,7 +85,12 @@ class Client:
                 if not length_bytes:
                     break
                 message_length = int.from_bytes(length_bytes, 'big')
-                message_bytes = self.socket.recv(message_length)
+                count = 0
+                message_bytes = b""
+                while count < message_length:
+                    recv_bytes = self.socket.recv(message_length)
+                    message_bytes += recv_bytes
+                    count += len(recv_bytes)
                 if not message_bytes:
                     break
                 message = json.loads(message_bytes.decode('utf-8'))
@@ -89,7 +99,7 @@ class Client:
                 elif message["type"] == "broadcast":
                     callback_func(message['data'])
             except Exception as e:
-                log(f"Error Receiving Message: {e}")
+                log(f"Error Receiving Message: {e} {message_bytes}")
         self.connected = False
         log("Disconnected from Server")
 
@@ -99,3 +109,4 @@ class Client:
             self.socket.close()
         except:
             pass
+
